@@ -846,12 +846,23 @@ export function activate(context: vscode.ExtensionContext) {
         canSelectMany: true,
     });
     context.subscriptions.push(view);
+    const mediaRoot = vscode.Uri.joinPath(context.extensionUri, 'media');
+    const swapFolderIcon = (node: FileNode, open: boolean) => {
+        if (!node.isDirectory) return;
+        // Mirror the same logic FileNode uses on construction.
+        const iconColors = context.workspaceState.get<Record<string, Swatch>>(ICON_COLOR_KEY, {});
+        const base = iconColors[node.uri.fsPath] ?? 'default';
+        const variant = open ? `${base}-open.svg` : `${base}.svg`;
+        node.iconPath = vscode.Uri.joinPath(mediaRoot, 'folders', variant);
+    };
     context.subscriptions.push(view.onDidExpandElement(async (e) => {
         await provider.markExpanded(e.element.uri.fsPath);
+        swapFolderIcon(e.element, true);
         provider.refreshNode(e.element);
     }));
     context.subscriptions.push(view.onDidCollapseElement(async (e) => {
         await provider.markCollapsed(e.element.uri.fsPath);
+        swapFolderIcon(e.element, false);
         provider.refreshNode(e.element);
     }));
 
