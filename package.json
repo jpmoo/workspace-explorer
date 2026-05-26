@@ -1,0 +1,66 @@
+{
+  "name": "workspace-explorer",
+  "displayName": "Workspace Explorer",
+  "description": "An alternate workspace file explorer with per-folder sorting and pinned files.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "workspaceExplorer",
+          "title": "Workspace Explorer",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "workspaceExplorer": [
+        {
+          "id": "workspaceExplorer.tree",
+          "name": "Workspace Explorer"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "workspaceExplorer.sortNameAsc", "title": "Sort by Name ASC" },
+      { "command": "workspaceExplorer.sortNameDesc", "title": "Sort by Name DESC" },
+      { "command": "workspaceExplorer.sortEditedAsc", "title": "Sort by Last Edited ASC" },
+      { "command": "workspaceExplorer.sortEditedDesc", "title": "Sort by Last Edited DESC" },
+      { "command": "workspaceExplorer.pinToFolder", "title": "Pin to Top of Folder" },
+      { "command": "workspaceExplorer.pinToTop", "title": "Pin to Top of List" },
+      { "command": "workspaceExplorer.unpin", "title": "Unpin" },
+      { "command": "workspaceExplorer.refresh", "title": "Refresh", "icon": "$(refresh)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "workspaceExplorer.refresh", "when": "view == workspaceExplorer.tree", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "workspaceExplorer.sortNameAsc",   "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@1" },
+        { "command": "workspaceExplorer.sortNameDesc",  "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@2" },
+        { "command": "workspaceExplorer.sortEditedAsc", "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@3" },
+        { "command": "workspaceExplorer.sortEditedDesc","when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@4" },
+        { "command": "workspaceExplorer.pinToFolder",   "when": "view == workspaceExplorer.tree && viewItem =~ /file/ && viewItem != pinnedFile", "group": "2_pin@1" },
+        { "command": "workspaceExplorer.pinToTop",      "when": "view == workspaceExplorer.tree && viewItem =~ /file/ && viewItem != pinnedFile", "group": "2_pin@2" },
+        { "command": "workspaceExplorer.unpin",         "when": "view == workspaceExplorer.tree && viewItem == pinnedFile", "group": "2_pin@3" }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}
