@@ -1,7 +1,7 @@
 {
   "name": "workspace-explorer",
   "displayName": "Workspace Explorer",
-  "description": "An alternate workspace file explorer with per-folder sorting and pinned files.",
+  "description": "An alternate workspace file explorer with per-folder sorting, pinned files, hidden files, and folder coloring.",
   "version": "0.1.0",
   "publisher": "local",
   "engines": {
@@ -9,8 +9,39 @@
   },
   "categories": ["Other"],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
+    "configuration": {
+      "title": "Workspace Explorer",
+      "properties": {
+        "workspaceExplorer.openOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Focus the Workspace Explorer view automatically when VSCode starts."
+        },
+        "workspaceExplorer.tagFileGlob": {
+          "type": "string",
+          "default": "**/*.md",
+          "description": "Glob for files scanned for tags."
+        },
+        "workspaceExplorer.orphanFileGlob": {
+          "type": "string",
+          "default": "**/*",
+          "description": "Glob for files considered when computing orphans."
+        },
+        "workspaceExplorer.recentFilesCount": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "description": "Number of files to show in the Recent Files view."
+        },
+        "workspaceExplorer.recentFilesGlob": {
+          "type": "string",
+          "default": "**/*",
+          "description": "Glob for files considered in the Recent Files view."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -22,34 +53,127 @@
     },
     "views": {
       "workspaceExplorer": [
-        {
-          "id": "workspaceExplorer.tree",
-          "name": "Workspace Explorer"
-        }
+        { "id": "workspaceExplorer.tree", "name": "Files" },
+        { "id": "workspaceExplorer.recent", "name": "Recent Files" },
+        { "id": "workspaceExplorer.tags", "name": "Tags" },
+        { "id": "workspaceExplorer.orphans", "name": "Orphans" }
       ]
     },
+    "submenus": [
+      { "id": "workspaceExplorer.iconColor", "label": "Folder Icon Color" },
+      { "id": "workspaceExplorer.textColor", "label": "Text Color" }
+    ],
     "commands": [
-      { "command": "workspaceExplorer.sortNameAsc", "title": "Sort by Name ASC" },
-      { "command": "workspaceExplorer.sortNameDesc", "title": "Sort by Name DESC" },
-      { "command": "workspaceExplorer.sortEditedAsc", "title": "Sort by Last Edited ASC" },
-      { "command": "workspaceExplorer.sortEditedDesc", "title": "Sort by Last Edited DESC" },
+      { "command": "workspaceExplorer.sortNameAsc", "title": "Sort by Name (A–Z)" },
+      { "command": "workspaceExplorer.sortNameDesc", "title": "Sort by Name (Z–A)" },
+      { "command": "workspaceExplorer.sortEditedAsc", "title": "Sort by Last Edited (Oldest)" },
+      { "command": "workspaceExplorer.sortEditedDesc", "title": "Sort by Last Edited (Newest)" },
       { "command": "workspaceExplorer.pinToFolder", "title": "Pin to Top of Folder" },
       { "command": "workspaceExplorer.pinToTop", "title": "Pin to Top of List" },
       { "command": "workspaceExplorer.unpin", "title": "Unpin" },
-      { "command": "workspaceExplorer.refresh", "title": "Refresh", "icon": "$(refresh)" }
+      { "command": "workspaceExplorer.hide", "title": "Hide" },
+      { "command": "workspaceExplorer.unhide", "title": "Unhide" },
+      { "command": "workspaceExplorer.refresh", "title": "Refresh", "icon": "$(refresh)" },
+      { "command": "workspaceExplorer.toggleHiddenShow", "title": "Show Hidden Files", "icon": "$(eye-closed)" },
+      { "command": "workspaceExplorer.toggleHiddenHide", "title": "Hide Hidden Files", "icon": "$(eye)" },
+      { "command": "workspaceExplorer.expandAll", "title": "Expand All", "icon": "$(expand-all)" },
+      { "command": "workspaceExplorer.collapseAll", "title": "Collapse All", "icon": "$(collapse-all)" },
+
+      { "command": "workspaceExplorer.iconColor.default", "title": "Default",  "category": "Workspace Explorer", "icon": "media/swatches/default.svg" },
+      { "command": "workspaceExplorer.iconColor.red",     "title": "Red",      "category": "Workspace Explorer", "icon": "media/swatches/red.svg" },
+      { "command": "workspaceExplorer.iconColor.orange",  "title": "Orange",   "category": "Workspace Explorer", "icon": "media/swatches/orange.svg" },
+      { "command": "workspaceExplorer.iconColor.yellow",  "title": "Yellow",   "category": "Workspace Explorer", "icon": "media/swatches/yellow.svg" },
+      { "command": "workspaceExplorer.iconColor.green",   "title": "Green",    "category": "Workspace Explorer", "icon": "media/swatches/green.svg" },
+      { "command": "workspaceExplorer.iconColor.blue",    "title": "Blue",     "category": "Workspace Explorer", "icon": "media/swatches/blue.svg" },
+      { "command": "workspaceExplorer.iconColor.purple",  "title": "Purple",   "category": "Workspace Explorer", "icon": "media/swatches/purple.svg" },
+      { "command": "workspaceExplorer.iconColor.gray",    "title": "Gray",     "category": "Workspace Explorer", "icon": "media/swatches/gray.svg" },
+
+      { "command": "workspaceExplorer.textColor.default", "title": "Default",  "category": "Workspace Explorer", "icon": "media/swatches/default.svg" },
+      { "command": "workspaceExplorer.textColor.red",     "title": "Red",      "category": "Workspace Explorer", "icon": "media/swatches/red.svg" },
+      { "command": "workspaceExplorer.textColor.orange",  "title": "Orange",   "category": "Workspace Explorer", "icon": "media/swatches/orange.svg" },
+      { "command": "workspaceExplorer.textColor.yellow",  "title": "Yellow",   "category": "Workspace Explorer", "icon": "media/swatches/yellow.svg" },
+      { "command": "workspaceExplorer.textColor.green",   "title": "Green",    "category": "Workspace Explorer", "icon": "media/swatches/green.svg" },
+      { "command": "workspaceExplorer.textColor.blue",    "title": "Blue",     "category": "Workspace Explorer", "icon": "media/swatches/blue.svg" },
+      { "command": "workspaceExplorer.textColor.purple",  "title": "Purple",   "category": "Workspace Explorer", "icon": "media/swatches/purple.svg" },
+      { "command": "workspaceExplorer.textColor.gray",    "title": "Gray",     "category": "Workspace Explorer", "icon": "media/swatches/gray.svg" },
+
+      { "command": "workspaceExplorer.revealInOS", "title": "Reveal in Finder" },
+      { "command": "workspaceExplorer.openInTerminal", "title": "Open in Integrated Terminal" },
+      { "command": "workspaceExplorer.copyPath", "title": "Copy Path" },
+      { "command": "workspaceExplorer.copyRelativePath", "title": "Copy Relative Path" },
+      { "command": "workspaceExplorer.openToSide", "title": "Open to the Side" },
+      { "command": "workspaceExplorer.rename", "title": "Rename…" },
+      { "command": "workspaceExplorer.delete", "title": "Delete" },
+      { "command": "workspaceExplorer.duplicate", "title": "Duplicate" },
+      { "command": "workspaceExplorer.newFile", "title": "New File…" },
+      { "command": "workspaceExplorer.newFolder", "title": "New Folder…" },
+      { "command": "workspaceExplorer.move", "title": "Move…" },
+
+      { "command": "workspaceExplorer.tags.refresh",    "title": "Refresh Tags",    "icon": "$(refresh)" },
+      { "command": "workspaceExplorer.orphans.refresh", "title": "Refresh Orphans", "icon": "$(refresh)" },
+      { "command": "workspaceExplorer.recent.refresh",  "title": "Refresh Recent",  "icon": "$(refresh)" }
     ],
     "menus": {
       "view/title": [
-        { "command": "workspaceExplorer.refresh", "when": "view == workspaceExplorer.tree", "group": "navigation" }
+        { "command": "workspaceExplorer.toggleHiddenShow", "when": "view == workspaceExplorer.tree && !workspaceExplorer.showHidden", "group": "navigation@1" },
+        { "command": "workspaceExplorer.toggleHiddenHide", "when": "view == workspaceExplorer.tree && workspaceExplorer.showHidden", "group": "navigation@1" },
+        { "command": "workspaceExplorer.expandAll",   "when": "view == workspaceExplorer.tree && !workspaceExplorer.expandAll", "group": "navigation@2" },
+        { "command": "workspaceExplorer.collapseAll", "when": "view == workspaceExplorer.tree && workspaceExplorer.expandAll",  "group": "navigation@2" },
+        { "command": "workspaceExplorer.refresh", "when": "view == workspaceExplorer.tree", "group": "navigation@3" },
+        { "command": "workspaceExplorer.tags.refresh",    "when": "view == workspaceExplorer.tags",    "group": "navigation" },
+        { "command": "workspaceExplorer.orphans.refresh", "when": "view == workspaceExplorer.orphans", "group": "navigation" },
+        { "command": "workspaceExplorer.recent.refresh",  "when": "view == workspaceExplorer.recent",  "group": "navigation" }
       ],
       "view/item/context": [
+        { "command": "workspaceExplorer.openToSide", "when": "view == workspaceExplorer.tree && viewItem =~ /file/", "group": "0_open@1" },
+
         { "command": "workspaceExplorer.sortNameAsc",   "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@1" },
         { "command": "workspaceExplorer.sortNameDesc",  "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@2" },
         { "command": "workspaceExplorer.sortEditedAsc", "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@3" },
         { "command": "workspaceExplorer.sortEditedDesc","when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "1_sort@4" },
+
         { "command": "workspaceExplorer.pinToFolder",   "when": "view == workspaceExplorer.tree && viewItem =~ /file/ && viewItem != pinnedFile", "group": "2_pin@1" },
         { "command": "workspaceExplorer.pinToTop",      "when": "view == workspaceExplorer.tree && viewItem =~ /file/ && viewItem != pinnedFile", "group": "2_pin@2" },
-        { "command": "workspaceExplorer.unpin",         "when": "view == workspaceExplorer.tree && viewItem == pinnedFile", "group": "2_pin@3" }
+        { "command": "workspaceExplorer.unpin",         "when": "view == workspaceExplorer.tree && viewItem == pinnedFile", "group": "2_pin@3" },
+
+        { "command": "workspaceExplorer.hide",          "when": "view == workspaceExplorer.tree && viewItem != hiddenFile && viewItem != hiddenFolder", "group": "3_hide@1" },
+        { "command": "workspaceExplorer.unhide",        "when": "view == workspaceExplorer.tree && (viewItem == hiddenFile || viewItem == hiddenFolder)", "group": "3_hide@2" },
+
+        { "submenu": "workspaceExplorer.iconColor", "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "4_color@1" },
+        { "submenu": "workspaceExplorer.textColor", "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "4_color@2" },
+
+        { "command": "workspaceExplorer.newFile",     "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "5_new@1" },
+        { "command": "workspaceExplorer.newFolder",   "when": "view == workspaceExplorer.tree && viewItem =~ /folder/", "group": "5_new@2" },
+
+        { "command": "workspaceExplorer.rename",      "when": "view == workspaceExplorer.tree", "group": "6_ops@1" },
+        { "command": "workspaceExplorer.move",        "when": "view == workspaceExplorer.tree", "group": "6_ops@2" },
+        { "command": "workspaceExplorer.duplicate",   "when": "view == workspaceExplorer.tree", "group": "6_ops@3" },
+        { "command": "workspaceExplorer.delete",      "when": "view == workspaceExplorer.tree", "group": "6_ops@4" },
+
+        { "command": "workspaceExplorer.revealInOS",       "when": "view == workspaceExplorer.tree", "group": "7_resource@1" },
+        { "command": "workspaceExplorer.openInTerminal",   "when": "view == workspaceExplorer.tree", "group": "7_resource@2" },
+        { "command": "workspaceExplorer.copyPath",         "when": "view == workspaceExplorer.tree", "group": "7_resource@3" },
+        { "command": "workspaceExplorer.copyRelativePath", "when": "view == workspaceExplorer.tree", "group": "7_resource@4" }
+      ],
+      "workspaceExplorer.iconColor": [
+        { "command": "workspaceExplorer.iconColor.default", "group": "0@0" },
+        { "command": "workspaceExplorer.iconColor.red",     "group": "1@1" },
+        { "command": "workspaceExplorer.iconColor.orange",  "group": "1@2" },
+        { "command": "workspaceExplorer.iconColor.yellow",  "group": "1@3" },
+        { "command": "workspaceExplorer.iconColor.green",   "group": "1@4" },
+        { "command": "workspaceExplorer.iconColor.blue",    "group": "1@5" },
+        { "command": "workspaceExplorer.iconColor.purple",  "group": "1@6" },
+        { "command": "workspaceExplorer.iconColor.gray",    "group": "1@7" }
+      ],
+      "workspaceExplorer.textColor": [
+        { "command": "workspaceExplorer.textColor.default", "group": "0@0" },
+        { "command": "workspaceExplorer.textColor.red",     "group": "1@1" },
+        { "command": "workspaceExplorer.textColor.orange",  "group": "1@2" },
+        { "command": "workspaceExplorer.textColor.yellow",  "group": "1@3" },
+        { "command": "workspaceExplorer.textColor.green",   "group": "1@4" },
+        { "command": "workspaceExplorer.textColor.blue",    "group": "1@5" },
+        { "command": "workspaceExplorer.textColor.purple",  "group": "1@6" },
+        { "command": "workspaceExplorer.textColor.gray",    "group": "1@7" }
       ]
     }
   },
