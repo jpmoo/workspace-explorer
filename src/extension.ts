@@ -512,17 +512,36 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
     private _onDidChangeTreeData = new vscode.EventEmitter<TagNode | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
     private tagMap: Map<string, vscode.Uri[]> = new Map();
+    private view: vscode.TreeView<TagNode> | undefined;
+    filter = '';
+
+    setView(view: vscode.TreeView<TagNode>): void { this.view = view; this.updateCount(); }
+
+    private updateCount(): void {
+        if (!this.view) return;
+        const needle = this.filter.trim().toLowerCase();
+        const visible = needle
+            ? [...this.tagMap.keys()].filter((t) => t.toLowerCase().includes(needle)).length
+            : this.tagMap.size;
+        this.view.description = needle
+            ? `${visible} / ${this.tagMap.size}`
+            : `${this.tagMap.size}`;
+    }
 
     refresh(): void {
-        this.scan().then(() => this._onDidChangeTreeData.fire());
+        this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); });
     }
+
+    fireChange(): void { this.updateCount(); this._onDidChangeTreeData.fire(); }
 
     getTreeItem(e: TagNode): vscode.TreeItem { return e; }
 
     async getChildren(e?: TagNode): Promise<TagNode[]> {
         if (!e) {
             if (this.tagMap.size === 0) await this.scan();
+            const needle = this.filter.trim().toLowerCase();
             return [...this.tagMap.entries()]
+                .filter(([tag]) => !needle || tag.toLowerCase().includes(needle))
                 .sort((a, b) => a[0].localeCompare(b[0]))
                 .map(([tag, files]) => new TagItem(tag, files.length));
         }
@@ -539,8 +558,8 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
     private async scan(): Promise<void> {
         this.tagMap = new Map();
         const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
-        const watched = cfg.get<string[]>('tagWatchedFolders', ['**/*.md']);
-        const include = combineIncludeGlob(watched, '**/*.md');
+        const included = cfg.get<string[]>('tagIncludedFolders', ['**/*.md']);
+        const include = combineIncludeGlob(included, '**/*.md');
         const files = await vscode.workspace.findFiles(include, '**/node_modules/**');
         await Promise.all(files.map(async (uri) => {
             try {
@@ -564,26 +583,29 @@ function extractTags(text: string): Set<string> {
     if (fm) {
         const fmBody = fm[1];
         for (const key of ['tags', 'tag', 'keywords']) {
-            const inline = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*\\[(.*?)\\]`, 'm'));
+            // List form first so the inline/CSV regex doesn't accidentally cross newlines.
+            const list = fmBody.match(new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
+            if (list) {
+                for (const line of list[1].split('\n')) {
+                    const m = line.match(/^[ \t]*-[ \t]*(.+?)[ \t]*$/);
+                    if (m) tags.add(m[1].replace(/^["']|["']$/g, '').replace(/^#/, ''));
+                }
+                continue;
+            }
+            const inline = fmBody.match(new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*\\[(.*?)\\]`, 'm'));
             if (inline) {
                 for (const raw of inline[1].split(',')) {
-                    const t = raw.trim().replace(/^["']|["']$/g, '');
-                    if (t) tags.add(t);
-                }
-            }
-            // CSV form: `tags: a, b, c`
-            const csv = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*([^\\[\\n][^\\n]*)$`, 'm'));
-            if (csv && !inline) {
-                for (const raw of csv[1].split(',')) {
                     const t = raw.trim().replace(/^["']|["']$/g, '').replace(/^#/, '');
                     if (t) tags.add(t);
                 }
+                continue;
             }
-            const list = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*\\n((?:\\s*-\\s*.+\\n?)+)`, 'm'));
-            if (list) {
-                for (const line of list[1].split('\n')) {
-                    const m = line.match(/^\s*-\s*(.+?)\s*$/);
-                    if (m) tags.add(m[1].replace(/^["']|["']$/g, '').replace(/^#/, ''));
+            // CSV form: `tags: a, b, c` — restrict to same line (no newline in whitespace).
+            const csv = fmBody.match(new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]+([^\\[\\n][^\\n]*)$`, 'm'));
+            if (csv) {
+                for (const raw of csv[1].split(',')) {
+                    const t = raw.trim().replace(/^["']|["']$/g, '').replace(/^#/, '');
+                    if (t) tags.add(t);
                 }
             }
         }
@@ -633,11 +655,15 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<OrphanItem | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
     private orphans: vscode.Uri[] = [];
+    private view: vscode.TreeView<OrphanItem> | undefined;
 
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
+    setView(view: vscode.TreeView<OrphanItem>): void { this.view = view; this.updateCount(); }
+    private updateCount(): void { if (this.view) this.view.description = `${this.orphans.length}`; }
+
     refresh(): void {
-        this.scan().then(() => this._onDidChangeTreeData.fire());
+        this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); });
     }
 
     getTreeItem(e: OrphanItem): vscode.TreeItem { return e; }
@@ -654,40 +680,57 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
     private async scan(): Promise<void> {
         this.orphans = [];
         const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
-        const watched = cfg.get<string[]>('orphanWatchedFolders', ['**/*']);
-        const ignored = cfg.get<string[]>('orphanIgnoredFolders', []);
-        const include = combineIncludeGlob(watched, '**/*');
-        // Watched supersedes ignored when explicitly set (non-default).
-        const isDefaultWatched = watched.length === 1 && watched[0] === '**/*';
-        const exclude = !isDefaultWatched ? undefined : combineExcludeGlob(ignored);
-        const files = await vscode.workspace.findFiles(include, exclude);
+        const included = cfg.get<string[]>('orphanIncludedFolders', ['**/*']);
+        const excluded = cfg.get<string[]>('orphanExcludedFolders', []);
+        const include = combineIncludeGlob(included, '**/*');
+        const exclude = combineExcludeGlob(excluded);
+
+        // Candidates: files we CHECK for being orphans (respects watched/ignored).
+        const candidateFiles = await vscode.workspace.findFiles(include, exclude);
         const hidden = new Set(this.main.getHidden());
         const showHidden = this.main.getShowHidden();
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const visible = showHidden ? files : files.filter((u) => !isHiddenAncestry(u.fsPath, hidden, root));
+        const candidates = showHidden
+            ? candidateFiles
+            : candidateFiles.filter((u) => !isHiddenAncestry(u.fsPath, hidden, root));
 
-        // Load text contents (skip binaries / large files).
+        // Reference corpus: ALL workspace text files (minus heavy excludes), so links
+        // from notes outside the watched folders still count.
+        const corpusFiles = await vscode.workspace.findFiles(
+            '**/*',
+            '{**/node_modules/**,**/.git/**}',
+        );
+
         const MAX = 1_000_000;
-        const contents: { uri: vscode.Uri; text: string }[] = [];
-        await Promise.all(visible.map(async (uri) => {
+        const loadText = async (uri: vscode.Uri): Promise<string | undefined> => {
             try {
                 const stat = await vscode.workspace.fs.stat(uri);
-                if (stat.size > MAX) return;
+                if (stat.size > MAX) return undefined;
                 const bytes = await vscode.workspace.fs.readFile(uri);
-                // crude binary check
-                let nul = 0;
-                for (let i = 0; i < Math.min(bytes.length, 512); i++) if (bytes[i] === 0) { nul++; break; }
-                if (nul) return;
-                contents.push({ uri, text: Buffer.from(bytes).toString('utf8') });
-            } catch { /* skip */ }
-        }));
+                for (let i = 0; i < Math.min(bytes.length, 512); i++) {
+                    if (bytes[i] === 0) return undefined; // binary
+                }
+                return Buffer.from(bytes).toString('utf8');
+            } catch { return undefined; }
+        };
 
-        const allText = contents.map((c) => c.text).join('\n\n');
-        for (const f of visible) {
+        const candidatePaths = new Set(candidates.map((u) => u.fsPath));
+        const corpus = await Promise.all(corpusFiles.map(async (uri) => {
+            const text = await loadText(uri);
+            return text === undefined ? undefined : { uri, text };
+        }));
+        const corpusItems = corpus.filter((c): c is { uri: vscode.Uri; text: string } => !!c);
+
+        // Build per-candidate "other text" = all corpus content EXCEPT the candidate's own file.
+        const corpusByPath = new Map(corpusItems.map((c) => [c.uri.fsPath, c.text]));
+        const fullCorpusText = corpusItems.map((c) => c.text).join('\n\n');
+
+        for (const f of candidates) {
             const base = path.basename(f.fsPath);
-            const stem = base.slice(0, -path.extname(base).length || base.length);
-            const self = contents.find((c) => c.uri.fsPath === f.fsPath);
-            const otherText = self ? allText.replace(self.text, '') : allText;
+            const ext = path.extname(base);
+            const stem = ext ? base.slice(0, -ext.length) : base;
+            const selfText = corpusByPath.get(f.fsPath) ?? '';
+            const otherText = selfText ? fullCorpusText.replace(selfText, '') : fullCorpusText;
             const referenced =
                 otherText.includes(base) ||
                 (stem && stem.length >= 3 && otherText.includes(stem));
@@ -716,10 +759,14 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<RecentItem | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
     private items: { uri: vscode.Uri; mtime: number }[] = [];
+    private view: vscode.TreeView<RecentItem> | undefined;
 
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
-    refresh(): void { this.scan().then(() => this._onDidChangeTreeData.fire()); }
+    setView(view: vscode.TreeView<RecentItem>): void { this.view = view; this.updateCount(); }
+    private updateCount(): void { if (this.view) this.view.description = `${this.items.length}`; }
+
+    refresh(): void { this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); }); }
 
     getTreeItem(e: RecentItem): vscode.TreeItem { return e; }
 
@@ -732,11 +779,10 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
     private async scan(): Promise<void> {
         const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
         const count = Math.max(1, cfg.get<number>('recentFilesCount', 15));
-        const watched = cfg.get<string[]>('recentWatchedFolders', ['**/*']);
-        const ignored = cfg.get<string[]>('recentIgnoredFolders', []);
-        const include = combineIncludeGlob(watched, '**/*');
-        const isDefaultWatched = watched.length === 1 && watched[0] === '**/*';
-        const exclude = !isDefaultWatched ? undefined : combineExcludeGlob(ignored);
+        const included = cfg.get<string[]>('recentIncludedFolders', ['**/*']);
+        const excluded = cfg.get<string[]>('recentExcludedFolders', []);
+        const include = combineIncludeGlob(included, '**/*');
+        const exclude = combineExcludeGlob(excluded);
         const files = await vscode.workspace.findFiles(include, exclude);
         const hidden = new Set(this.main.getHidden());
         const showHidden = this.main.getShowHidden();
@@ -770,11 +816,44 @@ export function activate(context: vscode.ExtensionContext) {
     const tagsProvider = new TagsProvider();
     const orphansProvider = new OrphansProvider(provider);
     const recentProvider = new RecentFilesProvider(provider);
+    const tagsView = vscode.window.createTreeView('workspaceExplorer.tags', { treeDataProvider: tagsProvider });
+    const orphansView = vscode.window.createTreeView('workspaceExplorer.orphans', { treeDataProvider: orphansProvider });
+    const recentView = vscode.window.createTreeView('workspaceExplorer.recent', { treeDataProvider: recentProvider });
+    tagsProvider.setView(tagsView);
+    orphansProvider.setView(orphansView);
+    recentProvider.setView(recentView);
     context.subscriptions.push(
-        vscode.window.createTreeView('workspaceExplorer.tags', { treeDataProvider: tagsProvider }),
-        vscode.window.createTreeView('workspaceExplorer.orphans', { treeDataProvider: orphansProvider }),
-        vscode.window.createTreeView('workspaceExplorer.recent', { treeDataProvider: recentProvider }),
+        tagsView,
+        orphansView,
+        recentView,
         vscode.commands.registerCommand('workspaceExplorer.tags.refresh', () => tagsProvider.refresh()),
+        vscode.commands.registerCommand('workspaceExplorer.tags.filter', () => {
+            const input = vscode.window.createInputBox();
+            input.placeholder = 'Filter tags as you type… (Enter to apply, Esc to cancel)';
+            input.value = tagsProvider.filter;
+            const original = tagsProvider.filter;
+            let accepted = false;
+            input.onDidChangeValue((value) => {
+                tagsProvider.filter = value;
+                vscode.commands.executeCommand('setContext', 'workspaceExplorer.tagFilterActive', !!value);
+                tagsProvider.fireChange();
+            });
+            input.onDidAccept(() => { accepted = true; input.hide(); });
+            input.onDidHide(() => {
+                if (!accepted) {
+                    tagsProvider.filter = original;
+                    vscode.commands.executeCommand('setContext', 'workspaceExplorer.tagFilterActive', !!original);
+                    tagsProvider.fireChange();
+                }
+                input.dispose();
+            });
+            input.show();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.tags.clearFilter', () => {
+            tagsProvider.filter = '';
+            vscode.commands.executeCommand('setContext', 'workspaceExplorer.tagFilterActive', false);
+            tagsProvider.fireChange();
+        }),
         vscode.commands.registerCommand('workspaceExplorer.orphans.refresh', () => orphansProvider.refresh()),
         vscode.commands.registerCommand('workspaceExplorer.recent.refresh', () => recentProvider.refresh()),
     );
@@ -782,22 +861,42 @@ export function activate(context: vscode.ExtensionContext) {
     // Refresh recent files when settings change.
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('workspaceExplorer.recentFilesCount')
-            || e.affectsConfiguration('workspaceExplorer.recentWatchedFolders')
-            || e.affectsConfiguration('workspaceExplorer.recentIgnoredFolders')) {
+            || e.affectsConfiguration('workspaceExplorer.recentIncludedFolders')
+            || e.affectsConfiguration('workspaceExplorer.recentExcludedFolders')) {
             recentProvider.refresh();
         }
-        if (e.affectsConfiguration('workspaceExplorer.orphanWatchedFolders')
-            || e.affectsConfiguration('workspaceExplorer.orphanIgnoredFolders')) {
+        if (e.affectsConfiguration('workspaceExplorer.orphanIncludedFolders')
+            || e.affectsConfiguration('workspaceExplorer.orphanExcludedFolders')) {
             orphansProvider.refresh();
         }
-        if (e.affectsConfiguration('workspaceExplorer.tagWatchedFolders')) {
+        if (e.affectsConfiguration('workspaceExplorer.tagIncludedFolders')) {
             tagsProvider.refresh();
         }
     }));
 
-    // Open on startup.
+    // Open on startup. The workbench restores its last sidebar view AFTER extensions activate
+    // (and sometimes after our first focus calls), so we brute-force focus for a few seconds
+    // and ALSO refocus the first time the user's window becomes active.
     if (vscode.workspace.getConfiguration('workspaceExplorer').get<boolean>('openOnStartup', false)) {
-        vscode.commands.executeCommand('workbench.view.extension.workspaceExplorer');
+        const focus = async () => {
+            try {
+                await vscode.commands.executeCommand('workbench.view.extension.workspaceExplorer');
+            } catch { /* ignore */ }
+            try {
+                await vscode.commands.executeCommand('workspaceExplorer.tree.focus');
+            } catch { /* ignore */ }
+        };
+        // Fire on a schedule covering ~6s, regardless of visibility state.
+        for (const ms of [0, 100, 250, 500, 1000, 1750, 2750, 4000, 6000]) {
+            setTimeout(focus, ms);
+        }
+        // Also refocus once on the first window-state change (covers the case where
+        // Cursor's restore happens at an unpredictable time).
+        const onceOnState = vscode.window.onDidChangeWindowState(() => {
+            focus();
+            onceOnState.dispose();
+        });
+        context.subscriptions.push(onceOnState);
     }
 
     // Refresh tags/orphans when workspace files change.
