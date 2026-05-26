@@ -75,10 +75,10 @@
     },
     "views": {
       "workspaceExplorer": [
-        { "id": "workspaceExplorer.tree", "name": "Files" },
-        { "id": "workspaceExplorer.recent", "name": "Recent Files" },
-        { "id": "workspaceExplorer.tags", "name": "Tags" },
-        { "id": "workspaceExplorer.orphans", "name": "Orphans" }
+        { "id": "workspaceExplorer.tree",    "name": "Files",        "initialSize": 6 },
+        { "id": "workspaceExplorer.recent",  "name": "Recent Files", "initialSize": 2 },
+        { "id": "workspaceExplorer.tags",    "name": "Tags",         "initialSize": 2 },
+        { "id": "workspaceExplorer.orphans", "name": "Orphans",      "initialSize": 2 }
       ]
     },
     "submenus": [

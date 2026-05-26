@@ -25,6 +25,7 @@ const EXPAND_ALL_KEY = 'workspaceExplorer.expandAll';
 const ICON_COLOR_KEY = 'workspaceExplorer.iconColor';   // folderPath -> Swatch
 const TEXT_COLOR_KEY = 'workspaceExplorer.textColor';   // folderPath -> Swatch (inherited)
 const FOLDER_ORDER_KEY = 'workspaceExplorer.folderOrder'; // parentPath -> ordered child folder names
+const EXPANDED_FOLDERS_KEY = 'workspaceExplorer.expandedFolders'; // string[] of expanded folder paths
 const DND_MIME = 'application/vnd.code.tree.workspaceexplorer';
 
 function isHiddenAncestry(filePath: string, hiddenSet: Set<string>, rootPath: string | undefined): boolean {
@@ -62,24 +63,27 @@ class FileNode extends vscode.TreeItem {
         expandByDefault: boolean,
         iconColor: Swatch | undefined,
         mediaRoot: vscode.Uri,
+        isExpanded: boolean = false,
     ) {
         super(
             uri,
             isDirectory
-                ? (expandByDefault
+                ? ((expandByDefault || isExpanded)
                     ? vscode.TreeItemCollapsibleState.Expanded
                     : vscode.TreeItemCollapsibleState.Collapsed)
                 : vscode.TreeItemCollapsibleState.None,
         );
         this.resourceUri = uri;
         this.label = path.basename(uri.fsPath);
+        // Stable id so VSCode can persist expand/collapse state across sessions.
+        this.id = uri.fsPath;
         if (isDirectory) {
             this.contextValue = hidden ? 'hiddenFolder' : 'folder';
-            this.iconPath = vscode.Uri.joinPath(
-                mediaRoot,
-                'folders',
-                `${iconColor ?? 'default'}.svg`,
-            );
+            // Always use our own folder icons (closed/open variants), so all folders
+            // get the open-state visual feedback even when no color is set.
+            const base = iconColor ?? 'default';
+            const variant = isExpanded ? `${base}-open.svg` : `${base}.svg`;
+            this.iconPath = vscode.Uri.joinPath(mediaRoot, 'folders', variant);
         } else {
             this.contextValue = hidden ? 'hiddenFile' : (pinned ? 'pinnedFile' : 'file');
             this.command = {
@@ -204,6 +208,10 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
     refresh(): void {
         this._onDidChangeTreeData.fire();
         this._onDidChangeFileDecorations.fire(undefined);
+    }
+
+    refreshNode(node: FileNode): void {
+        this._onDidChangeTreeData.fire(node);
     }
 
     getTreeItem(element: FileNode): vscode.TreeItem {
@@ -356,6 +364,7 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         }
 
         const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const expandedSet = this.getExpandedFolders();
         const toNode = (i: typeof items[number]): FileNode => {
             const isDir = i.type === vscode.FileType.Directory;
             const isHidden = isHiddenAncestry(i.uri.fsPath, hidden, rootPath);
@@ -367,7 +376,8 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
                         ? 'folder'
                         : null;
             const iconColor = isDir ? iconColors[i.uri.fsPath] : undefined;
-            return new FileNode(i.uri, isDir, dir.fsPath, pinned, isHidden, expandAll, iconColor, this.mediaRoot);
+            const wasExpanded = isDir && expandedSet.has(i.uri.fsPath);
+            return new FileNode(i.uri, isDir, dir.fsPath, pinned, isHidden, expandAll, iconColor, this.mediaRoot, wasExpanded);
         };
 
         return [...folderPinned.map(toNode), ...dirs.map(toNode), ...regular.map(toNode)];
@@ -444,6 +454,21 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
     }
 
     // ---- expand/collapse ----
+    // ---- per-folder expansion persistence ----
+    getExpandedFolders(): Set<string> {
+        return new Set(this.context.workspaceState.get<string[]>(EXPANDED_FOLDERS_KEY, []));
+    }
+    async markExpanded(folderPath: string): Promise<void> {
+        const set = this.getExpandedFolders();
+        set.add(folderPath);
+        await this.context.workspaceState.update(EXPANDED_FOLDERS_KEY, [...set]);
+    }
+    async markCollapsed(folderPath: string): Promise<void> {
+        const set = this.getExpandedFolders();
+        set.delete(folderPath);
+        await this.context.workspaceState.update(EXPANDED_FOLDERS_KEY, [...set]);
+    }
+
     getExpandAll(): boolean { return this.context.workspaceState.get<boolean>(EXPAND_ALL_KEY, false); }
     async setExpandAll(expand: boolean): Promise<void> {
         await this.context.workspaceState.update(EXPAND_ALL_KEY, expand);
@@ -523,9 +548,10 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
         const visible = needle
             ? [...this.tagMap.keys()].filter((t) => t.toLowerCase().includes(needle)).length
             : this.tagMap.size;
-        this.view.title = needle
+        const next = needle
             ? `Tags (${visible} / ${this.tagMap.size})`
             : `Tags (${this.tagMap.size})`;
+        if (this.view.title !== next) this.view.title = next;
     }
 
     refresh(): void {
@@ -660,7 +686,11 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
     setView(view: vscode.TreeView<OrphanItem>): void { this.view = view; this.updateCount(); }
-    private updateCount(): void { if (this.view) this.view.title = `Orphans (${this.orphans.length})`; }
+    private updateCount(): void {
+        if (!this.view) return;
+        const next = `Orphans (${this.orphans.length})`;
+        if (this.view.title !== next) this.view.title = next;
+    }
 
     refresh(): void {
         this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); });
@@ -764,7 +794,11 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
     setView(view: vscode.TreeView<RecentItem>): void { this.view = view; this.updateCount(); }
-    private updateCount(): void { if (this.view) this.view.title = `Recent Files (${this.items.length})`; }
+    private updateCount(): void {
+        if (!this.view) return;
+        const next = `Recent Files (${this.items.length})`;
+        if (this.view.title !== next) this.view.title = next;
+    }
 
     refresh(): void { this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); }); }
 
@@ -812,6 +846,14 @@ export function activate(context: vscode.ExtensionContext) {
         canSelectMany: true,
     });
     context.subscriptions.push(view);
+    context.subscriptions.push(view.onDidExpandElement(async (e) => {
+        await provider.markExpanded(e.element.uri.fsPath);
+        provider.refreshNode(e.element);
+    }));
+    context.subscriptions.push(view.onDidCollapseElement(async (e) => {
+        await provider.markCollapsed(e.element.uri.fsPath);
+        provider.refreshNode(e.element);
+    }));
 
     const tagsProvider = new TagsProvider();
     const orphansProvider = new OrphansProvider(provider);
