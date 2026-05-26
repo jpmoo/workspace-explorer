@@ -27,6 +27,31 @@ const TEXT_COLOR_KEY = 'workspaceExplorer.textColor';   // folderPath -> Swatch 
 const FOLDER_ORDER_KEY = 'workspaceExplorer.folderOrder'; // parentPath -> ordered child folder names
 const DND_MIME = 'application/vnd.code.tree.workspaceexplorer';
 
+function isHiddenAncestry(filePath: string, hiddenSet: Set<string>, rootPath: string | undefined): boolean {
+    let cur = filePath;
+    while (true) {
+        const base = path.basename(cur);
+        if (base.startsWith('.')) return true;
+        if (hiddenSet.has(cur)) return true;
+        if (!rootPath || cur === rootPath) return false;
+        const parent = path.dirname(cur);
+        if (parent === cur) return false;
+        cur = parent;
+    }
+}
+
+function combineExcludeGlob(patterns: string[]): string | undefined {
+    if (!patterns || patterns.length === 0) return undefined;
+    if (patterns.length === 1) return patterns[0];
+    return `{${patterns.join(',')}}`;
+}
+
+function combineIncludeGlob(patterns: string[], fallback: string): string {
+    if (!patterns || patterns.length === 0) return fallback;
+    if (patterns.length === 1) return patterns[0];
+    return `{${patterns.join(',')}}`;
+}
+
 class FileNode extends vscode.TreeItem {
     constructor(
         public readonly uri: vscode.Uri,
@@ -185,6 +210,22 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         return element;
     }
 
+    getParent(element: FileNode): FileNode | undefined {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!root || !element.parentDir || element.parentDir === root) return undefined;
+        const parentUri = vscode.Uri.file(element.parentDir);
+        return new FileNode(
+            parentUri,
+            true,
+            path.dirname(element.parentDir),
+            null,
+            false,
+            false,
+            undefined,
+            vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+        );
+    }
+
     // -------- FileDecorationProvider: text color inherited from nearest ancestor folder --------
     provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
         const swatch = this.resolveTextColor(uri.fsPath);
@@ -314,9 +355,10 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
             else regular.push(f);
         }
 
+        const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const toNode = (i: typeof items[number]): FileNode => {
             const isDir = i.type === vscode.FileType.Directory;
-            const isHidden = i.name.startsWith('.') || hidden.has(i.uri.fsPath);
+            const isHidden = isHiddenAncestry(i.uri.fsPath, hidden, rootPath);
             const pinned: 'folder' | 'top' | null = isDir
                 ? null
                 : topPins.has(i.uri.fsPath)
@@ -496,8 +538,10 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
 
     private async scan(): Promise<void> {
         this.tagMap = new Map();
-        const glob = vscode.workspace.getConfiguration('workspaceExplorer').get<string>('tagFileGlob', '**/*.md');
-        const files = await vscode.workspace.findFiles(glob, '**/node_modules/**');
+        const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
+        const watched = cfg.get<string[]>('tagWatchedFolders', ['**/*.md']);
+        const include = combineIncludeGlob(watched, '**/*.md');
+        const files = await vscode.workspace.findFiles(include, '**/node_modules/**');
         await Promise.all(files.map(async (uri) => {
             try {
                 const bytes = await vscode.workspace.fs.readFile(uri);
@@ -514,36 +558,60 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
 
 function extractTags(text: string): Set<string> {
     const tags = new Set<string>();
+
     // Frontmatter.
     const fm = text.match(/^---\s*\n([\s\S]*?)\n---/);
     if (fm) {
-        const body = fm[1];
-        const inline = body.match(/^\s*tags\s*:\s*\[(.*?)\]/m);
-        if (inline) {
-            for (const raw of inline[1].split(',')) {
-                const t = raw.trim().replace(/^["']|["']$/g, '');
-                if (t) tags.add(t);
+        const fmBody = fm[1];
+        for (const key of ['tags', 'tag', 'keywords']) {
+            const inline = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*\\[(.*?)\\]`, 'm'));
+            if (inline) {
+                for (const raw of inline[1].split(',')) {
+                    const t = raw.trim().replace(/^["']|["']$/g, '');
+                    if (t) tags.add(t);
+                }
             }
-        }
-        const list = body.match(/^\s*tags\s*:\s*\n((?:\s*-\s*.+\n?)+)/m);
-        if (list) {
-            for (const line of list[1].split('\n')) {
-                const m = line.match(/^\s*-\s*(.+?)\s*$/);
-                if (m) tags.add(m[1].replace(/^["']|["']$/g, ''));
+            // CSV form: `tags: a, b, c`
+            const csv = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*([^\\[\\n][^\\n]*)$`, 'm'));
+            if (csv && !inline) {
+                for (const raw of csv[1].split(',')) {
+                    const t = raw.trim().replace(/^["']|["']$/g, '').replace(/^#/, '');
+                    if (t) tags.add(t);
+                }
+            }
+            const list = fmBody.match(new RegExp(`^\\s*${key}\\s*:\\s*\\n((?:\\s*-\\s*.+\\n?)+)`, 'm'));
+            if (list) {
+                for (const line of list[1].split('\n')) {
+                    const m = line.match(/^\s*-\s*(.+?)\s*$/);
+                    if (m) tags.add(m[1].replace(/^["']|["']$/g, '').replace(/^#/, ''));
+                }
             }
         }
     }
-    // Inline #tags — skip first column of headings (#, ##, ### followed by space).
-    const body = fm ? text.slice(fm[0].length) : text;
-    const re = /(^|[^#\w/])#([A-Za-z][\w/-]*)/g;
+
+    // Strip frontmatter, fenced code blocks, and inline code spans before inline-tag scan.
+    let body = fm ? text.slice(fm[0].length) : text;
+    body = body.replace(/```[\s\S]*?```/g, ' ');
+    body = body.replace(/~~~[\s\S]*?~~~/g, ' ');
+    body = body.replace(/`[^`\n]*`/g, ' ');
+    // Strip markdown link/image targets so `](#anchor)` and `](url#frag)` don't match.
+    body = body.replace(/\]\([^)]*\)/g, ']');
+
+    // Obsidian-style multi-word tag: #[[Some Tag]]
+    const multi = /(^|[^\w])#\[\[([^\]]+)\]\]/gu;
+    let mm: RegExpExecArray | null;
+    while ((mm = multi.exec(body))) {
+        const t = mm[2].trim();
+        if (t) tags.add(t);
+    }
+
+    // Plain inline tags: #tag, #tag/subtag, #2024-q1 (must contain at least one letter).
+    const re = /(^|[^#\w/`])#([A-Za-z0-9_][\w/\-]*)/gu;
     let m: RegExpExecArray | null;
     while ((m = re.exec(body))) {
-        // Skip markdown headings: '#' or '##' etc. at start of line followed by space.
-        const idx = m.index + m[1].length;
-        const lineStart = body.lastIndexOf('\n', idx - 1) + 1;
-        const lineHead = body.slice(lineStart, idx + 1);
-        if (/^#+\s/.test(lineHead) || /^#+$/.test(lineHead)) continue;
-        tags.add(m[2]);
+        const tag = m[2];
+        if (!/[A-Za-z]/.test(tag)) continue; // require at least one letter
+        tags.add(tag);
     }
     return tags;
 }
@@ -566,6 +634,8 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
     private orphans: vscode.Uri[] = [];
 
+    constructor(private readonly main: WorkspaceExplorerProvider) {}
+
     refresh(): void {
         this.scan().then(() => this._onDidChangeTreeData.fire());
     }
@@ -583,13 +653,23 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
 
     private async scan(): Promise<void> {
         this.orphans = [];
-        const glob = vscode.workspace.getConfiguration('workspaceExplorer').get<string>('orphanFileGlob', '**/*');
-        const files = await vscode.workspace.findFiles(glob, '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/build/**}');
+        const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
+        const watched = cfg.get<string[]>('orphanWatchedFolders', ['**/*']);
+        const ignored = cfg.get<string[]>('orphanIgnoredFolders', []);
+        const include = combineIncludeGlob(watched, '**/*');
+        // Watched supersedes ignored when explicitly set (non-default).
+        const isDefaultWatched = watched.length === 1 && watched[0] === '**/*';
+        const exclude = !isDefaultWatched ? undefined : combineExcludeGlob(ignored);
+        const files = await vscode.workspace.findFiles(include, exclude);
+        const hidden = new Set(this.main.getHidden());
+        const showHidden = this.main.getShowHidden();
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const visible = showHidden ? files : files.filter((u) => !isHiddenAncestry(u.fsPath, hidden, root));
 
         // Load text contents (skip binaries / large files).
         const MAX = 1_000_000;
         const contents: { uri: vscode.Uri; text: string }[] = [];
-        await Promise.all(files.map(async (uri) => {
+        await Promise.all(visible.map(async (uri) => {
             try {
                 const stat = await vscode.workspace.fs.stat(uri);
                 if (stat.size > MAX) return;
@@ -603,8 +683,7 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
         }));
 
         const allText = contents.map((c) => c.text).join('\n\n');
-        // For each file, check if its basename (or basename-without-extension for .md) appears anywhere outside itself.
-        for (const f of files) {
+        for (const f of visible) {
             const base = path.basename(f.fsPath);
             const stem = base.slice(0, -path.extname(base).length || base.length);
             const self = contents.find((c) => c.uri.fsPath === f.fsPath);
@@ -638,6 +717,8 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
     private items: { uri: vscode.Uri; mtime: number }[] = [];
 
+    constructor(private readonly main: WorkspaceExplorerProvider) {}
+
     refresh(): void { this.scan().then(() => this._onDidChangeTreeData.fire()); }
 
     getTreeItem(e: RecentItem): vscode.TreeItem { return e; }
@@ -650,10 +731,18 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
 
     private async scan(): Promise<void> {
         const cfg = vscode.workspace.getConfiguration('workspaceExplorer');
-        const glob = cfg.get<string>('recentFilesGlob', '**/*');
         const count = Math.max(1, cfg.get<number>('recentFilesCount', 15));
-        const files = await vscode.workspace.findFiles(glob, '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/build/**}');
-        const stats = await Promise.all(files.map(async (uri) => {
+        const watched = cfg.get<string[]>('recentWatchedFolders', ['**/*']);
+        const ignored = cfg.get<string[]>('recentIgnoredFolders', []);
+        const include = combineIncludeGlob(watched, '**/*');
+        const isDefaultWatched = watched.length === 1 && watched[0] === '**/*';
+        const exclude = !isDefaultWatched ? undefined : combineExcludeGlob(ignored);
+        const files = await vscode.workspace.findFiles(include, exclude);
+        const hidden = new Set(this.main.getHidden());
+        const showHidden = this.main.getShowHidden();
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const visible = showHidden ? files : files.filter((u) => !isHiddenAncestry(u.fsPath, hidden, root));
+        const stats = await Promise.all(visible.map(async (uri) => {
             try {
                 const s = await vscode.workspace.fs.stat(uri);
                 if (s.type !== vscode.FileType.File) return undefined;
@@ -679,8 +768,8 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(view);
 
     const tagsProvider = new TagsProvider();
-    const orphansProvider = new OrphansProvider();
-    const recentProvider = new RecentFilesProvider();
+    const orphansProvider = new OrphansProvider(provider);
+    const recentProvider = new RecentFilesProvider(provider);
     context.subscriptions.push(
         vscode.window.createTreeView('workspaceExplorer.tags', { treeDataProvider: tagsProvider }),
         vscode.window.createTreeView('workspaceExplorer.orphans', { treeDataProvider: orphansProvider }),
@@ -692,8 +781,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Refresh recent files when settings change.
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('workspaceExplorer.recentFilesCount') || e.affectsConfiguration('workspaceExplorer.recentFilesGlob')) {
+        if (e.affectsConfiguration('workspaceExplorer.recentFilesCount')
+            || e.affectsConfiguration('workspaceExplorer.recentWatchedFolders')
+            || e.affectsConfiguration('workspaceExplorer.recentIgnoredFolders')) {
             recentProvider.refresh();
+        }
+        if (e.affectsConfiguration('workspaceExplorer.orphanWatchedFolders')
+            || e.affectsConfiguration('workspaceExplorer.orphanIgnoredFolders')) {
+            orphansProvider.refresh();
+        }
+        if (e.affectsConfiguration('workspaceExplorer.tagWatchedFolders')) {
+            tagsProvider.refresh();
         }
     }));
 
@@ -766,10 +864,35 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('workspaceExplorer.unhide', (node?: FileNode) => {
             if (requireNode(node)) return provider.unhide(node.uri.fsPath);
         }),
-        vscode.commands.registerCommand('workspaceExplorer.toggleHiddenShow', () => provider.setShowHidden(true)),
-        vscode.commands.registerCommand('workspaceExplorer.toggleHiddenHide', () => provider.setShowHidden(false)),
-        vscode.commands.registerCommand('workspaceExplorer.expandAll', () => provider.setExpandAll(true)),
-        vscode.commands.registerCommand('workspaceExplorer.collapseAll', () => provider.setExpandAll(false)),
+        vscode.commands.registerCommand('workspaceExplorer.toggleHiddenShow', async () => {
+            await provider.setShowHidden(true);
+            recentProvider.refresh();
+            orphansProvider.refresh();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.toggleHiddenHide', async () => {
+            await provider.setShowHidden(false);
+            recentProvider.refresh();
+            orphansProvider.refresh();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.expandAll', async () => {
+            await provider.setExpandAll(true);
+            // Walk the tree and reveal every folder. expand: 3 = expand 3 levels at a time.
+            const walk = async (parent?: FileNode, depth = 0): Promise<void> => {
+                if (depth > 12) return; // safety
+                const children = await provider.getChildren(parent);
+                for (const child of children) {
+                    if (child.isDirectory) {
+                        try { await view.reveal(child, { expand: 3, select: false, focus: false }); } catch { /* ignore */ }
+                        await walk(child, depth + 1);
+                    }
+                }
+            };
+            await walk();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.collapseAll', async () => {
+            await provider.setExpandAll(false);
+            await vscode.commands.executeCommand('workbench.actions.treeView.workspaceExplorer.tree.collapseAll');
+        }),
     );
 
     // Register all color swatch commands.

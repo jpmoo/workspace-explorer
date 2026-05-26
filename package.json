@@ -19,15 +19,23 @@
           "default": false,
           "description": "Focus the Workspace Explorer view automatically when VSCode starts."
         },
-        "workspaceExplorer.tagFileGlob": {
-          "type": "string",
-          "default": "**/*.md",
-          "description": "Glob for files scanned for tags."
+        "workspaceExplorer.tagWatchedFolders": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*.md"],
+          "description": "Glob patterns (one per entry) for files scanned for tags. When non-empty, ONLY these patterns are scanned and Ignored Folders is bypassed."
         },
-        "workspaceExplorer.orphanFileGlob": {
-          "type": "string",
-          "default": "**/*",
-          "description": "Glob for files considered when computing orphans."
+        "workspaceExplorer.orphanWatchedFolders": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*"],
+          "description": "Glob patterns (one per entry) for files considered by the Orphans scan. When non-empty, ONLY these patterns are scanned and Ignored Folders is bypassed."
+        },
+        "workspaceExplorer.orphanIgnoredFolders": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/node_modules/**", "**/.git/**", "**/out/**", "**/dist/**", "**/build/**"],
+          "description": "Glob patterns excluded from the Orphans scan. Only applied when Watched Folders is empty."
         },
         "workspaceExplorer.recentFilesCount": {
           "type": "number",
@@ -35,10 +43,17 @@
           "minimum": 1,
           "description": "Number of files to show in the Recent Files view."
         },
-        "workspaceExplorer.recentFilesGlob": {
-          "type": "string",
-          "default": "**/*",
-          "description": "Glob for files considered in the Recent Files view."
+        "workspaceExplorer.recentWatchedFolders": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*"],
+          "description": "Glob patterns (one per entry) for files considered by the Recent Files view. When non-empty, ONLY these patterns are scanned and Ignored Folders is bypassed."
+        },
+        "workspaceExplorer.recentIgnoredFolders": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/node_modules/**", "**/.git/**", "**/out/**", "**/dist/**", "**/build/**"],
+          "description": "Glob patterns excluded from the Recent Files view. Only applied when Watched Folders is empty."
         }
       }
     },
@@ -121,8 +136,12 @@
         { "command": "workspaceExplorer.collapseAll", "when": "view == workspaceExplorer.tree && workspaceExplorer.expandAll",  "group": "navigation@2" },
         { "command": "workspaceExplorer.refresh", "when": "view == workspaceExplorer.tree", "group": "navigation@3" },
         { "command": "workspaceExplorer.tags.refresh",    "when": "view == workspaceExplorer.tags",    "group": "navigation" },
-        { "command": "workspaceExplorer.orphans.refresh", "when": "view == workspaceExplorer.orphans", "group": "navigation" },
-        { "command": "workspaceExplorer.recent.refresh",  "when": "view == workspaceExplorer.recent",  "group": "navigation" }
+        { "command": "workspaceExplorer.toggleHiddenShow", "when": "view == workspaceExplorer.orphans && !workspaceExplorer.showHidden", "group": "navigation@1" },
+        { "command": "workspaceExplorer.toggleHiddenHide", "when": "view == workspaceExplorer.orphans && workspaceExplorer.showHidden",  "group": "navigation@1" },
+        { "command": "workspaceExplorer.orphans.refresh", "when": "view == workspaceExplorer.orphans", "group": "navigation@2" },
+        { "command": "workspaceExplorer.toggleHiddenShow", "when": "view == workspaceExplorer.recent && !workspaceExplorer.showHidden", "group": "navigation@1" },
+        { "command": "workspaceExplorer.toggleHiddenHide", "when": "view == workspaceExplorer.recent && workspaceExplorer.showHidden",  "group": "navigation@1" },
+        { "command": "workspaceExplorer.recent.refresh",  "when": "view == workspaceExplorer.recent",  "group": "navigation@2" }
       ],
       "view/item/context": [
         { "command": "workspaceExplorer.openToSide", "when": "view == workspaceExplorer.tree && viewItem =~ /file/", "group": "0_open@1" },
