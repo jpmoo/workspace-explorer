@@ -523,9 +523,9 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
         const visible = needle
             ? [...this.tagMap.keys()].filter((t) => t.toLowerCase().includes(needle)).length
             : this.tagMap.size;
-        this.view.description = needle
-            ? `${visible} / ${this.tagMap.size}`
-            : `${this.tagMap.size}`;
+        this.view.title = needle
+            ? `Tags (${visible} / ${this.tagMap.size})`
+            : `Tags (${this.tagMap.size})`;
     }
 
     refresh(): void {
@@ -660,7 +660,7 @@ class OrphansProvider implements vscode.TreeDataProvider<OrphanItem> {
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
     setView(view: vscode.TreeView<OrphanItem>): void { this.view = view; this.updateCount(); }
-    private updateCount(): void { if (this.view) this.view.description = `${this.orphans.length}`; }
+    private updateCount(): void { if (this.view) this.view.title = `Orphans (${this.orphans.length})`; }
 
     refresh(): void {
         this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); });
@@ -764,7 +764,7 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
     constructor(private readonly main: WorkspaceExplorerProvider) {}
 
     setView(view: vscode.TreeView<RecentItem>): void { this.view = view; this.updateCount(); }
-    private updateCount(): void { if (this.view) this.view.description = `${this.items.length}`; }
+    private updateCount(): void { if (this.view) this.view.title = `Recent Files (${this.items.length})`; }
 
     refresh(): void { this.scan().then(() => { this.updateCount(); this._onDidChangeTreeData.fire(); }); }
 
@@ -822,6 +822,10 @@ export function activate(context: vscode.ExtensionContext) {
     tagsProvider.setView(tagsView);
     orphansProvider.setView(orphansView);
     recentProvider.setView(recentView);
+    // Populate counts up front so titles show numbers even before the user expands the views.
+    tagsProvider.refresh();
+    orphansProvider.refresh();
+    recentProvider.refresh();
     context.subscriptions.push(
         tagsView,
         orphansView,
