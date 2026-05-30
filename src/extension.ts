@@ -1184,9 +1184,25 @@ function fileGlyphSvg(ext: string): string {
 
 class CollectionPreviewPanel {
     private static panel: vscode.WebviewPanel | undefined;
+    // How to re-gather + re-render the currently shown collection. Set by the
+    // open commands; cleared when the panel is disposed.
+    private static reload: (() => Promise<void>) | undefined;
 
     private static getLayout(context: vscode.ExtensionContext): 'expanded' | 'compressed' {
         return context.workspaceState.get<'expanded' | 'compressed'>(COLLECTION_LAYOUT_KEY, 'expanded');
+    }
+
+    // Remember how to rebuild the current collection so a filesystem change
+    // (rename/delete/move/new from a context menu, drag-drop, or external tool)
+    // can refresh the board in place.
+    static setSource(reload: () => Promise<void>): void {
+        this.reload = reload;
+    }
+
+    // Re-render the open panel from its source. No-op if no panel is open, so a
+    // file change never pops the board back up after the user closed it.
+    static async refresh(): Promise<void> {
+        if (this.panel && this.reload) await this.reload();
     }
 
     static async show(context: vscode.ExtensionContext, heading: string, files: string[]): Promise<void> {
@@ -1508,22 +1524,30 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('workspaceExplorer.openFolder', async (uri?: vscode.Uri) => {
             // No-op when the feature is disabled, preserving plain expand/collapse behavior.
             if (!collectionPreviewEnabled() || !uri) return;
-            const files: string[] = [];
-            await collectMarkdownFiles(uri.fsPath, files, 500);
-            // Order preview cards using the folder's own sort mode (Feature 1).
-            const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
-            await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, sorted);
+            const run = async () => {
+                const files: string[] = [];
+                await collectMarkdownFiles(uri.fsPath, files, 500);
+                // Order preview cards using the folder's own sort mode (Feature 1).
+                const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
+                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, sorted);
+            };
+            CollectionPreviewPanel.setSource(run);
+            await run();
         }),
         vscode.commands.registerCommand('workspaceExplorer.openTag', async (tag?: string) => {
             if (!collectionPreviewEnabled() || !tag) return;
-            const files = tagsProvider.filesForTag(tag);
-            // Order tag preview cards by basename. TagSortMode's count modes have
-            // no per-file meaning here, so they fall back to ascending name; name
-            // modes honor the chosen direction.
-            const tagSort = tagsProvider.getTagSort();
-            const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
-            const sorted = await sortFilePaths(files, dir);
-            await CollectionPreviewPanel.show(context, `Tag: #${tag}`, sorted);
+            const run = async () => {
+                const files = tagsProvider.filesForTag(tag);
+                // Order tag preview cards by basename. TagSortMode's count modes have
+                // no per-file meaning here, so they fall back to ascending name; name
+                // modes honor the chosen direction.
+                const tagSort = tagsProvider.getTagSort();
+                const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
+                const sorted = await sortFilePaths(files, dir);
+                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, sorted);
+            };
+            CollectionPreviewPanel.setSource(run);
+            await run();
         }),
         vscode.commands.registerCommand('workspaceExplorer.tags.sortNameAsc', () => tagsProvider.setTagSort('nameAsc')),
         vscode.commands.registerCommand('workspaceExplorer.tags.sortNameDesc', () => tagsProvider.setTagSort('nameDesc')),
@@ -1888,9 +1912,15 @@ export function activate(context: vscode.ExtensionContext) {
     // Create/delete can change structure; still debounced.
     const debouncedStructureRefresh = debounce(() => provider.refreshTree(), 250);
 
+    // Keep the collection-preview board in sync with the filesystem. A
+    // rename/delete/move/duplicate/new — from the card context menu, the tree
+    // menu, drag-drop, or an external tool — surfaces here as create/delete
+    // events, so re-render the board (no-op when it's closed).
+    const debouncedPreviewRefresh = debounce(() => { void CollectionPreviewPanel.refresh(); }, 250);
+
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
-    watcher.onDidCreate(() => debouncedStructureRefresh());
-    watcher.onDidDelete(() => debouncedStructureRefresh());
+    watcher.onDidCreate(() => { debouncedStructureRefresh(); debouncedPreviewRefresh(); });
+    watcher.onDidDelete(() => { debouncedStructureRefresh(); debouncedPreviewRefresh(); });
     // Content edits only affect ordering when an mtime-based sort is active. Skipping
     // the refresh otherwise avoids invalidating tree rows on every keystroke, which
     // made colored labels/icons flash to their default (white) color mid-repaint.
