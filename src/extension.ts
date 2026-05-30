@@ -3,6 +3,7 @@ import * as path from 'path';
 import MarkdownIt = require('markdown-it');
 
 type SortMode = 'nameAsc' | 'nameDesc' | 'editedAsc' | 'editedDesc';
+type TagSortMode = 'nameAsc' | 'nameDesc' | 'countDesc' | 'countAsc';
 type Swatch = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'gray';
 const SWATCHES: Swatch[] = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'];
 
@@ -29,6 +30,30 @@ const CSS_COLOR_BY_SWATCH: Record<Swatch, string> = {
 
 const DEFAULT_SORT: SortMode = 'nameAsc';
 const SORTS_KEY = 'workspaceExplorer.sorts';
+const TAG_SORT_KEY = 'workspaceExplorer.tagSort';
+const DEFAULT_TAG_SORT: TagSortMode = 'nameAsc';
+
+// Compare two basenames per the name direction of a SortMode. Shared so the
+// collection preview orders cards exactly like the explorer's directory listing.
+function compareByName(aName: string, bName: string, mode: SortMode): number {
+    return mode === 'nameDesc' ? bName.localeCompare(aName) : aName.localeCompare(bName);
+}
+
+// Sort a flat list of file paths by SortMode, statting files for the edited
+// modes (via vscode.workspace.fs, matching readDir's mtime source). Mirrors the
+// explorer's per-file comparison so preview cards match the folder ordering.
+async function sortFilePaths(files: string[], mode: SortMode): Promise<string[]> {
+    if (mode === 'nameAsc' || mode === 'nameDesc') {
+        return [...files].sort((a, b) => compareByName(path.basename(a), path.basename(b), mode));
+    }
+    const withMtime = await Promise.all(files.map(async (f) => {
+        let mtime = 0;
+        try { mtime = (await vscode.workspace.fs.stat(vscode.Uri.file(f))).mtime; } catch { mtime = 0; }
+        return { f, mtime };
+    }));
+    withMtime.sort((a, b) => mode === 'editedAsc' ? a.mtime - b.mtime : b.mtime - a.mtime);
+    return withMtime.map((x) => x.f);
+}
 const PINNED_FOLDER_KEY = 'workspaceExplorer.pinnedInFolder';
 const PINNED_TOP_KEY = 'workspaceExplorer.pinnedTop';
 const HIDDEN_KEY = 'workspaceExplorer.hidden';
@@ -617,6 +642,8 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
     private view: vscode.TreeView<TagNode> | undefined;
     filter = '';
 
+    constructor(private readonly context: vscode.ExtensionContext) {}
+
     setView(view: vscode.TreeView<TagNode>): void { this.view = view; this.updateCount(); }
 
     private updateCount(): void {
@@ -643,13 +670,30 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
         return (this.tagMap.get(tag) ?? []).map((u) => u.fsPath);
     }
 
+    getTagSort(): TagSortMode {
+        return this.context.workspaceState.get<TagSortMode>(TAG_SORT_KEY, DEFAULT_TAG_SORT);
+    }
+
+    setTagSort(mode: TagSortMode): void {
+        this.context.workspaceState.update(TAG_SORT_KEY, mode);
+        this._onDidChangeTreeData.fire();
+    }
+
     async getChildren(e?: TagNode): Promise<TagNode[]> {
         if (!e) {
             if (this.tagMap.size === 0) await this.scan();
             const needle = this.filter.trim().toLowerCase();
+            const tagSort = this.getTagSort();
             return [...this.tagMap.entries()]
                 .filter(([tag]) => !needle || tag.toLowerCase().includes(needle))
-                .sort((a, b) => a[0].localeCompare(b[0]))
+                .sort((a, b) => {
+                    switch (tagSort) {
+                        case 'nameDesc':   return b[0].localeCompare(a[0]);
+                        case 'countDesc':  return b[1].length - a[1].length || a[0].localeCompare(b[0]);
+                        case 'countAsc':   return a[1].length - b[1].length || a[0].localeCompare(b[0]);
+                        default:           return a[0].localeCompare(b[0]);
+                    }
+                })
                 .map(([tag, files]) => new TagItem(tag, files.length));
         }
         if (e instanceof TagItem) {
@@ -1369,7 +1413,7 @@ export function activate(context: vscode.ExtensionContext) {
         provider.refreshNode(e.element);
     }));
 
-    const tagsProvider = new TagsProvider();
+    const tagsProvider = new TagsProvider(context);
     const orphansProvider = new OrphansProvider(provider);
     const recentProvider = new RecentFilesProvider(provider);
     const tagsView = vscode.window.createTreeView('workspaceExplorer.tags', { treeDataProvider: tagsProvider });
@@ -1391,13 +1435,25 @@ export function activate(context: vscode.ExtensionContext) {
             if (!collectionPreviewEnabled() || !uri) return;
             const files: string[] = [];
             await collectMarkdownFiles(uri.fsPath, files, 500);
-            await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, files);
+            // Order preview cards using the folder's own sort mode (Feature 1).
+            const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
+            await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, sorted);
         }),
         vscode.commands.registerCommand('workspaceExplorer.openTag', async (tag?: string) => {
             if (!collectionPreviewEnabled() || !tag) return;
             const files = tagsProvider.filesForTag(tag);
-            await CollectionPreviewPanel.show(context, `Tag: #${tag}`, files);
+            // Order tag preview cards by basename. TagSortMode's count modes have
+            // no per-file meaning here, so they fall back to ascending name; name
+            // modes honor the chosen direction.
+            const tagSort = tagsProvider.getTagSort();
+            const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
+            const sorted = await sortFilePaths(files, dir);
+            await CollectionPreviewPanel.show(context, `Tag: #${tag}`, sorted);
         }),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameAsc', () => tagsProvider.setTagSort('nameAsc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameDesc', () => tagsProvider.setTagSort('nameDesc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortCountDesc', () => tagsProvider.setTagSort('countDesc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortCountAsc', () => tagsProvider.setTagSort('countAsc')),
         vscode.commands.registerCommand('workspaceExplorer.tags.refresh', () => tagsProvider.refresh()),
         vscode.commands.registerCommand('workspaceExplorer.tags.filter', () => {
             const input = vscode.window.createInputBox();

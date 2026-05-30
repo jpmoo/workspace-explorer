@@ -143,6 +143,11 @@
       {
         "id": "workspaceExplorer.textColor",
         "label": "Text Color"
+      },
+      {
+        "id": "workspaceExplorer.tagSort",
+        "label": "Sort Tags",
+        "icon": "$(sort-precedence)"
       }
     ],
     "commands": [
@@ -371,6 +376,22 @@
         "command": "workspaceExplorer.recent.refresh",
         "title": "Refresh Recent",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "workspaceExplorer.tags.sortNameAsc",
+        "title": "Sort Tags by Name (A–Z)"
+      },
+      {
+        "command": "workspaceExplorer.tags.sortNameDesc",
+        "title": "Sort Tags by Name (Z–A)"
+      },
+      {
+        "command": "workspaceExplorer.tags.sortCountDesc",
+        "title": "Sort Tags by Count (High–Low)"
+      },
+      {
+        "command": "workspaceExplorer.tags.sortCountAsc",
+        "title": "Sort Tags by Count (Low–High)"
       }
     ],
     "menus": {
@@ -444,6 +465,11 @@
           "command": "workspaceExplorer.recent.refresh",
           "when": "view == workspaceExplorer.recent",
           "group": "navigation@2"
+        },
+        {
+          "submenu": "workspaceExplorer.tagSort",
+          "when": "view == workspaceExplorer.tags",
+          "group": "navigation@0"
         }
       ],
       "view/item/context": [
@@ -624,6 +650,24 @@
         {
           "command": "workspaceExplorer.textColor.gray",
           "group": "1@7"
+        }
+      ],
+      "workspaceExplorer.tagSort": [
+        {
+          "command": "workspaceExplorer.tags.sortNameAsc",
+          "group": "1@1"
+        },
+        {
+          "command": "workspaceExplorer.tags.sortNameDesc",
+          "group": "1@2"
+        },
+        {
+          "command": "workspaceExplorer.tags.sortCountDesc",
+          "group": "1@3"
+        },
+        {
+          "command": "workspaceExplorer.tags.sortCountAsc",
+          "group": "1@4"
         }
       ]
     }
