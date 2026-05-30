@@ -192,57 +192,93 @@ async function moveEntry(src: vscode.Uri, destDir: vscode.Uri): Promise<boolean>
 }
 
 class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vscode.FileDecorationProvider, vscode.TreeDragAndDropController<FileNode> {
-    readonly dragMimeTypes = [DND_MIME];
-    readonly dropMimeTypes = [DND_MIME];
+    // Accept our internal drags (files + folders) plus `text/uri-list`, which is
+    // what VS Code's built-in explorer and the OS use when dragging files in.
+    readonly dragMimeTypes = [DND_MIME, 'text/uri-list'];
+    readonly dropMimeTypes = [DND_MIME, 'text/uri-list'];
 
     handleDrag(source: readonly FileNode[], data: vscode.DataTransfer): void {
-        // Only allow folder drags (we reorder folders within their parent).
-        const folders = source.filter((n) => n.isDirectory).map((n) => n.uri.fsPath);
-        if (folders.length === 0) return;
-        data.set(DND_MIME, new vscode.DataTransferItem(JSON.stringify(folders)));
+        // Carry the dir flag so the drop side knows folders without statting.
+        const items = source.map((n) => ({ p: n.uri.fsPath, d: n.isDirectory }));
+        if (items.length === 0) return;
+        data.set(DND_MIME, new vscode.DataTransferItem(JSON.stringify(items)));
+        // Expose a uri-list too so items can be dragged into other views/apps.
+        data.set('text/uri-list', new vscode.DataTransferItem(source.map((n) => n.uri.toString()).join('\r\n')));
     }
 
     async handleDrop(target: FileNode | undefined, data: vscode.DataTransfer): Promise<void> {
-        const item = data.get(DND_MIME);
-        if (!item) return;
-        let payload: string[];
-        try { payload = JSON.parse(await item.asString()); } catch { return; }
-        if (!Array.isArray(payload) || payload.length === 0) return;
+        const destDir = this.resolveDropDir(target);
+        if (!destDir) return;
 
-        // All dragged folders must share a parent for reordering to make sense.
-        const parents = new Set(payload.map((p) => path.dirname(p)));
-        if (parents.size !== 1) {
-            vscode.window.showWarningMessage('Workspace Explorer: can only reorder folders that share the same parent.');
+        // Internal drag: move items within the workspace. If everything is already
+        // in the destination AND we're dropping onto a sibling folder, treat it as
+        // a reorder instead (preserves the custom folder-ordering feature).
+        const internal = data.get(DND_MIME);
+        if (internal) {
+            let payload: { p: string; d: boolean }[];
+            try { payload = JSON.parse(await internal.asString()); } catch { return; }
+            if (!Array.isArray(payload) || payload.length === 0) return;
+
+            const allInDest = payload.every((it) => path.dirname(it.p) === destDir.fsPath);
+            if (allInDest) {
+                if (target && target.isDirectory && payload.every((it) => it.d)) {
+                    await this.reorderFolders(destDir.fsPath, payload.map((it) => path.basename(it.p)), path.basename(target.uri.fsPath));
+                }
+                return;
+            }
+
+            let moved = false;
+            for (const it of payload) {
+                if (this.isInvalidMove(it.p, destDir)) continue;
+                if (await moveEntry(vscode.Uri.file(it.p), destDir)) moved = true;
+            }
+            if (moved) this.refresh();
             return;
         }
-        const sourceParent = [...parents][0];
 
-        // Determine drop parent: dropping on a folder = drop inside it; dropping on a file = into its folder; undefined = workspace root.
-        let dropParent: string;
-        let beforeName: string | undefined;
-        if (!target) {
-            dropParent = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        } else if (target.isDirectory) {
-            // If target folder is a sibling of source, treat as "insert before this sibling".
-            if (path.dirname(target.uri.fsPath) === sourceParent) {
-                dropParent = sourceParent;
-                beforeName = path.basename(target.uri.fsPath);
+        // External drag (from VS Code's file explorer or the OS): move items that
+        // already live in the workspace, copy in ones from outside.
+        const uriList = await data.get('text/uri-list')?.asString();
+        if (!uriList) return;
+        const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+        const isInsideWorkspace = (p: string) => roots.some((r) => p === r || p.startsWith(r + path.sep));
+
+        let changed = false;
+        for (const line of uriList.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            let src: vscode.Uri;
+            try { src = vscode.Uri.parse(trimmed, true); } catch { continue; }
+            if (src.scheme !== 'file' || this.isInvalidMove(src.fsPath, destDir)) continue;
+
+            if (isInsideWorkspace(src.fsPath)) {
+                if (await moveEntry(src, destDir)) changed = true;
             } else {
-                // Otherwise interpret as "drop inside this folder" — but we don't support cross-parent moves yet.
-                vscode.window.showWarningMessage('Workspace Explorer: drag-and-drop only reorders folders within the same parent (filesystem moves are not yet supported).');
-                return;
-            }
-        } else {
-            // Dropped on a file: place at the end of that file's folder.
-            dropParent = path.dirname(target.uri.fsPath);
-            if (dropParent !== sourceParent) {
-                vscode.window.showWarningMessage('Workspace Explorer: drag-and-drop only reorders folders within the same parent.');
-                return;
+                const dest = vscode.Uri.joinPath(destDir, path.basename(src.fsPath));
+                if (await pathExists(dest)) {
+                    vscode.window.showErrorMessage(`'${path.basename(src.fsPath)}' already exists in the destination.`);
+                    continue;
+                }
+                try { await vscode.workspace.fs.copy(src, dest, { overwrite: false }); changed = true; }
+                catch (e: any) { vscode.window.showErrorMessage(`Copy failed: ${e?.message ?? e}`); }
             }
         }
-        if (dropParent !== sourceParent) return;
+        if (changed) this.refresh();
+    }
 
-        await this.reorderFolders(sourceParent, payload.map((p) => path.basename(p)), beforeName);
+    // Drop onto a folder targets that folder; onto a file targets its parent;
+    // onto empty space targets the workspace root.
+    private resolveDropDir(target: FileNode | undefined): vscode.Uri | undefined {
+        if (!target) return vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (target.isDirectory) return target.uri;
+        return vscode.Uri.file(path.dirname(target.uri.fsPath));
+    }
+
+    // Reject no-op moves (already in destDir) and moving a folder into itself/a descendant.
+    private isInvalidMove(srcPath: string, destDir: vscode.Uri): boolean {
+        if (path.dirname(srcPath) === destDir.fsPath) return true;
+        const d = destDir.fsPath;
+        return d === srcPath || d.startsWith(srcPath + path.sep);
     }
 
     private async reorderFolders(parent: string, movingNames: string[], beforeName: string | undefined): Promise<void> {
