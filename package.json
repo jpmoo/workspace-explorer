@@ -584,6 +584,23 @@
           "group": "7_resource@4"
         }
       ],
+      "webview/context": [
+        {
+          "command": "workspaceExplorer.openToSide",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "0_open@1"
+        },
+        {
+          "command": "workspaceExplorer.copyPath",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "7_resource@1"
+        },
+        {
+          "command": "workspaceExplorer.copyRelativePath",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "7_resource@2"
+        }
+      ],
       "workspaceExplorer.iconColor": [
         {
           "command": "workspaceExplorer.iconColor.default",

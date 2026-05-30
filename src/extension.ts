@@ -1041,6 +1041,15 @@ function resolveFolderColor(filePath: string, iconColors: Record<string, Swatch>
     return undefined;
 }
 
+// Middle-truncate a filename, always preserving the extension.
+function truncateFilename(name: string, max = 40): string {
+    if (name.length <= max) return name;
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    const keep = Math.max(1, max - ext.length - 1);
+    return stem.slice(0, keep).trimEnd() + '…' + ext;
+}
+
 // Strip leading YAML frontmatter from a markdown body.
 function stripFrontmatter(body: string): string {
     return body.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
@@ -1083,30 +1092,8 @@ async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch
         body = '';
     }
     body = stripFrontmatter(body);
-    const headingMatch = body.match(/^\s{0,3}#{1,6}\s+(.+)$/m);
-    let title: string;
-    if (headingMatch) {
-        title = headingMatch[1].trim();
-    } else {
-        // No heading: use the first non-empty content line (frontmatter already
-        // stripped), with light markdown markers removed, truncated if long.
-        const firstLine = body
-            .split('\n')
-            .map((l) => l.trim())
-            .find((l) => l.length > 0);
-        if (firstLine) {
-            const cleaned = firstLine
-                .replace(/^[-*+]\s+(\[[ xX]\]\s+)?/, '')
-                .replace(/^>\s*/, '')
-                .replace(/[*_`~]/g, '')
-                .trim();
-            title = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;
-        } else {
-            title = path.basename(filePath, path.extname(filePath));
-        }
-    }
     const rendered = makeTaskCheckboxesInteractive(md.render(body));
-    return { path: filePath, title, kind: 'markdown', html: rendered, color };
+    return { path: filePath, title: filename, kind: 'markdown', html: rendered, color };
 }
 
 // Flip the Nth (0-based) task-list checkbox in a markdown file's source to `checked`.
@@ -1214,22 +1201,23 @@ class CollectionPreviewPanel {
             let inner: string;
             if (c.kind === 'image') {
                 const src = webview.asWebviewUri(vscode.Uri.file(c.path)).toString();
-                inner = `<div class="card-title">${escapeHtml(c.title)}</div>
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${escapeHtml(truncateFilename(c.title))}</div>
                     <div class="card-body img-body"><img class="card-img" src="${src}" alt="${escapeHtml(c.title)}"></div>`;
             } else if (c.kind === 'file') {
                 const ext = path.extname(c.path).toLowerCase();
-                inner = `<div class="card-body file-body">
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${escapeHtml(truncateFilename(c.title))}</div>
+                    <div class="card-body file-body">
                         <div class="file-glyph">${fileGlyphSvg(ext)}</div>
-                        <div class="file-name">${escapeHtml(c.title)}</div>
+                        <div class="file-name">${escapeHtml(truncateFilename(c.title))}</div>
                     </div>`;
             } else {
                 // markdown
-                inner = `<div class="card-title">${escapeHtml(c.title)}</div>
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${escapeHtml(truncateFilename(c.title))}</div>
                     <div class="card-body md-body">${c.html}</div>`;
             }
             // file-kind cards never expand: always rendered at compressed size.
             const kindClass = `card card-${c.kind}`;
-            return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-vscode-context="${ctx}">
+            return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-vscode-context="${ctx}" style="border-left-color: ${accent};">
                 ${inner}
             </div>`;
         }).join('\n');
@@ -1334,7 +1322,12 @@ class CollectionPreviewPanel {
 
     /* ---- Compressed mode: uniform fixed card height with soft fade-out. ---- */
     /* Chosen object-fit: cover for images here too (MindChuk-style filled thumbnails). */
-    .grid.compressed .card-markdown .card-body,
+    .grid.compressed .card-markdown .card-body {
+        max-height: 160px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        position: relative;
+    }
     .grid.compressed .card-image .card-body {
         max-height: 160px;
         overflow: hidden;
