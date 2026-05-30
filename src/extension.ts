@@ -1578,7 +1578,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const tagSort = tagsProvider.getTagSort();
                 const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
                 const sorted = await sortFilePaths(files, dir);
-                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, sorted);
+                const pinned = new Set(provider.getAllPinnedPaths());
+                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, applyPinOrder(sorted, pinned));
             };
             CollectionPreviewPanel.setSource(run);
             await run();
