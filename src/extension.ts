@@ -538,6 +538,8 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         sorts[folderPath] = mode;
         await this.context.workspaceState.update(SORTS_KEY, sorts);
         this.refresh();
+        // Re-order any open collection board to match the new sort.
+        void CollectionPreviewPanel.refresh();
     }
 
     // ---- pins ----
@@ -728,6 +730,8 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
     setTagSort(mode: TagSortMode): void {
         this.context.workspaceState.update(TAG_SORT_KEY, mode);
         this._onDidChangeTreeData.fire();
+        // Re-order any open tag collection board to match the new sort.
+        void CollectionPreviewPanel.refresh();
     }
 
     async getChildren(e?: TagNode): Promise<TagNode[]> {
@@ -1348,7 +1352,10 @@ class CollectionPreviewPanel {
     .card-title {
         font-weight: 600;
         margin-bottom: 6px;
-        word-break: break-word;
+        /* Filename is already middle-truncated; keep it to a single line. */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     .card-body { position: relative; }
 
