@@ -1372,7 +1372,7 @@ class CollectionPreviewPanel {
             const isPinned = pinnedSet.has(c.path);
             const kindClass = `card card-${c.kind}${isPinned ? ' card-pinned' : ''}`;
             const badge = isPinned ? `<div class="pin-badge" title="Pinned">${PIN_BADGE_SVG}</div>` : '';
-            return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-search="${escapeHtml(c.search)}" data-vscode-context="${ctx}" style="border-left-color: ${accent};">
+            return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-search="${escapeHtml(c.search)}" data-vscode-context="${ctx}" style="--card-accent: ${accent}; border-left-color: ${accent};">
                 ${badge}${inner}
             </div>`;
         }).join('\n');
@@ -1470,7 +1470,11 @@ class CollectionPreviewPanel {
         break-inside: avoid;
         -webkit-column-break-inside: avoid;
         margin: 0 0 14px 0;
-        background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+        /* Dim wash of the folder color (--card-accent) over the base card surface,
+           so each card's background matches its left-border / folder color. */
+        --card-base: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+        --card-accent: var(--vscode-panel-border);
+        background: color-mix(in srgb, var(--card-accent) 12%, var(--card-base));
         border: 1px solid var(--vscode-panel-border);
         border-left-width: 4px;
         border-left-color: var(--vscode-panel-border);
@@ -1595,7 +1599,7 @@ class CollectionPreviewPanel {
     .grid.compressed .card-markdown .card-body::after {
         content: "";
         position: absolute; left: 0; right: 0; bottom: 0; height: 36px;
-        background: linear-gradient(to bottom, transparent, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+        background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--card-accent) 12%, var(--card-base)));
         pointer-events: none;
     }
 </style>
