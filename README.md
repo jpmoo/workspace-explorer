@@ -15,16 +15,20 @@ Built for note-taking / personal-knowledge-management workflows (Markdown vaults
 - **Hidden files** — hide noise and toggle visibility on demand.
 - **Open/closed folder icons**, persisted expansion state, and drag-and-drop moving.
 - **Tags**, **orphans**, and **recent files** views for navigating a Markdown vault.
+- **Tag sorting** — sort the Tags view by name (A→Z / Z→A) or by count (high→low / low→high).
 
 ### Collection Preview (MindChuk-style board)
 Click a **folder** or a **tag** to open a scrollable card board of its notes in the editor area. Toggle it in settings via `workspaceExplorer.collectionPreview.enabled`.
 
-- **Expand / Compress toggle** — view cards at their natural height, or truncate them all to a uniform size.
+- **True masonry layout** — cards pack top-to-bottom in responsive columns with no row gaps.
+- **Matches your sort** — cards follow the source folder's sort mode (or the current tag sort).
+- **Expand / Compress toggle** — view cards at their natural height, or truncate them all to a uniform size. Compressed cards stay individually scrollable.
 - **Rendered Markdown previews** — notes render as (smaller-scale) preview Markdown, with **interactive task checkboxes** that write back to the source file.
 - **Images** — shown as a centered slice at a fixed height when expanded, shrunk to fit when compressed.
 - **PDFs and other files** — shown as a compact file thumbnail.
-- **Cards are colored** by their folder's assigned color.
-- **Right-click a card** for the same actions as right-clicking the file in the explorer (rename, move, duplicate, delete, pin, hide, reveal, copy path, …).
+- **Cards are colored** by their nearest colored ancestor folder.
+- **Card titles** show the filename (with extension), middle-truncated when long.
+- **Right-click a card** for the same actions as right-clicking the file in the explorer — open to side, pin/unpin, hide/unhide, rename, move, duplicate, delete, reveal in OS, open in terminal, and copy (relative) path.
 
 ## Install
 
