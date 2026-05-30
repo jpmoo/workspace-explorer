@@ -1083,9 +1083,28 @@ async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch
         body = '';
     }
     body = stripFrontmatter(body);
-    let title = path.basename(filePath, path.extname(filePath));
     const headingMatch = body.match(/^\s{0,3}#{1,6}\s+(.+)$/m);
-    if (headingMatch) title = headingMatch[1].trim();
+    let title: string;
+    if (headingMatch) {
+        title = headingMatch[1].trim();
+    } else {
+        // No heading: use the first non-empty content line (frontmatter already
+        // stripped), with light markdown markers removed, truncated if long.
+        const firstLine = body
+            .split('\n')
+            .map((l) => l.trim())
+            .find((l) => l.length > 0);
+        if (firstLine) {
+            const cleaned = firstLine
+                .replace(/^[-*+]\s+(\[[ xX]\]\s+)?/, '')
+                .replace(/^>\s*/, '')
+                .replace(/[*_`~]/g, '')
+                .trim();
+            title = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;
+        } else {
+            title = path.basename(filePath, path.extname(filePath));
+        }
+    }
     const rendered = makeTaskCheckboxesInteractive(md.render(body));
     return { path: filePath, title, kind: 'markdown', html: rendered, color };
 }
@@ -1245,14 +1264,18 @@ class CollectionPreviewPanel {
     }
     .layout-toggle:hover { opacity: 0.85; }
     .note { opacity: 0.7; margin-bottom: 12px; font-size: 0.9em; }
+    /* True masonry via CSS multi-column flow: cards pack top-to-bottom within
+       each column with no row-height gaps (a CSS grid aligns rows, leaving the
+       gaps the user saw). column-width drives the responsive column count. */
     .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-        gap: 14px;
-        align-items: start;
+        column-width: 240px;
+        column-gap: 14px;
     }
     .card {
         position: relative;
+        break-inside: avoid;
+        -webkit-column-break-inside: avoid;
+        margin: 0 0 14px 0;
         background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
         border: 1px solid var(--vscode-panel-border);
         border-left-width: 4px;
