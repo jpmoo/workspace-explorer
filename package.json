@@ -59,7 +59,7 @@
             "**/build/**"
           ],
           "order": 21,
-          "markdownDescription": "Folder glob patterns excluded from the Orphans scan. Always applied — excludes operate **within** the Included Folders set."
+          "markdownDescription": "Folder glob patterns excluded from the Orphans scan. Always applied \u2014 excludes operate **within** the Included Folders set."
         },
         "workspaceExplorer.recentFilesCount": {
           "type": "number",
@@ -92,7 +92,7 @@
             "**/build/**"
           ],
           "order": 32,
-          "markdownDescription": "Folder glob patterns excluded from the Recent Files view. Always applied — excludes operate **within** the Included Folders set."
+          "markdownDescription": "Folder glob patterns excluded from the Recent Files view. Always applied \u2014 excludes operate **within** the Included Folders set."
         },
         "workspaceExplorer.collectionPreview.enabled": {
           "type": "boolean",
@@ -153,11 +153,11 @@
     "commands": [
       {
         "command": "workspaceExplorer.sortNameAsc",
-        "title": "Sort by Name (A–Z)"
+        "title": "Sort by Name (A\u2013Z)"
       },
       {
         "command": "workspaceExplorer.sortNameDesc",
-        "title": "Sort by Name (Z–A)"
+        "title": "Sort by Name (Z\u2013A)"
       },
       {
         "command": "workspaceExplorer.sortEditedAsc",
@@ -330,7 +330,7 @@
       },
       {
         "command": "workspaceExplorer.rename",
-        "title": "Rename…"
+        "title": "Rename\u2026"
       },
       {
         "command": "workspaceExplorer.delete",
@@ -342,15 +342,15 @@
       },
       {
         "command": "workspaceExplorer.newFile",
-        "title": "New File…"
+        "title": "New File\u2026"
       },
       {
         "command": "workspaceExplorer.newFolder",
-        "title": "New Folder…"
+        "title": "New Folder\u2026"
       },
       {
         "command": "workspaceExplorer.move",
-        "title": "Move…"
+        "title": "Move\u2026"
       },
       {
         "command": "workspaceExplorer.tags.refresh",
@@ -359,7 +359,7 @@
       },
       {
         "command": "workspaceExplorer.tags.filter",
-        "title": "Filter Tags…",
+        "title": "Filter Tags\u2026",
         "icon": "$(search)"
       },
       {
@@ -379,19 +379,19 @@
       },
       {
         "command": "workspaceExplorer.tags.sortNameAsc",
-        "title": "Sort Tags by Name (A–Z)"
+        "title": "Sort Tags by Name (A\u2013Z)"
       },
       {
         "command": "workspaceExplorer.tags.sortNameDesc",
-        "title": "Sort Tags by Name (Z–A)"
+        "title": "Sort Tags by Name (Z\u2013A)"
       },
       {
         "command": "workspaceExplorer.tags.sortCountDesc",
-        "title": "Sort Tags by Count (High–Low)"
+        "title": "Sort Tags by Count (High\u2013Low)"
       },
       {
         "command": "workspaceExplorer.tags.sortCountAsc",
-        "title": "Sort Tags by Count (Low–High)"
+        "title": "Sort Tags by Count (Low\u2013High)"
       }
     ],
     "menus": {
@@ -591,14 +591,69 @@
           "group": "0_open@1"
         },
         {
+          "command": "workspaceExplorer.pinToFolder",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "1_pin@1"
+        },
+        {
+          "command": "workspaceExplorer.pinToTop",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "1_pin@2"
+        },
+        {
+          "command": "workspaceExplorer.unpin",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "1_pin@3"
+        },
+        {
+          "command": "workspaceExplorer.hide",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "2_vis@1"
+        },
+        {
+          "command": "workspaceExplorer.unhide",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "2_vis@2"
+        },
+        {
+          "command": "workspaceExplorer.rename",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "3_edit@1"
+        },
+        {
+          "command": "workspaceExplorer.move",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "3_edit@2"
+        },
+        {
+          "command": "workspaceExplorer.duplicate",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "3_edit@3"
+        },
+        {
+          "command": "workspaceExplorer.delete",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "3_edit@4"
+        },
+        {
+          "command": "workspaceExplorer.revealInOS",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "6_os@1"
+        },
+        {
+          "command": "workspaceExplorer.openInTerminal",
+          "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
+          "group": "6_os@2"
+        },
+        {
           "command": "workspaceExplorer.copyPath",
           "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
-          "group": "7_resource@1"
+          "group": "7_resource@3"
         },
         {
           "command": "workspaceExplorer.copyRelativePath",
           "when": "webviewSection == 'previewCard' && webviewId == 'workspaceExplorerCollectionPreview'",
-          "group": "7_resource@2"
+          "group": "7_resource@4"
         }
       ],
       "workspaceExplorer.iconColor": [
