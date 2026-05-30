@@ -1210,7 +1210,7 @@ class CollectionPreviewPanel {
                     localResourceRoots: roots,
                 },
             );
-            this.panel.onDidDispose(() => { this.panel = undefined; });
+            this.panel.onDidDispose(() => { this.panel = undefined; this.reload = undefined; });
             this.panel.webview.onDidReceiveMessage(async (msg) => {
                 if (!msg || typeof msg.type !== 'string') return;
                 if (msg.type === 'open' && typeof msg.path === 'string') {

@@ -1,0 +1,38 @@
+1185|class CollectionPreviewPanel {
+1186|    private static panel: vscode.WebviewPanel | undefined;
+1187|
+1188|    private static getLayout(context: vscode.ExtensionContext): 'expanded' | 'compressed' {
+1189|        return context.workspaceState.get<'expanded' | 'compressed'>(COLLECTION_LAYOUT_KEY, 'expanded');
+1190|    }
+1191|
+1192|    static async show(context: vscode.ExtensionContext, heading: string, files: string[]): Promise<void> {
+1193|        const iconColors = context.workspaceState.get<Record<string, Swatch>>(ICON_COLOR_KEY, {});
+1194|        const MAX = 500;
+==== openFolder ====
+1508|        vscode.commands.registerCommand('workspaceExplorer.openFolder', async (uri?: vscode.Uri) => {
+1509|            // No-op when the feature is disabled, preserving plain expand/collapse behavior.
+1510|            if (!collectionPreviewEnabled() || !uri) return;
+1511|            const files: string[] = [];
+1512|            await collectMarkdownFiles(uri.fsPath, files, 500);
+1513|            // Order preview cards using the folder's own sort mode (Feature 1).
+1514|            const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
+1515|            await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, sorted);
+1516|        }),
+1517|        vscode.commands.registerCommand('workspaceExplorer.openTag', async (tag?: string) => {
+1518|            if (!collectionPreviewEnabled() || !tag) return;
+1519|            const files = tagsProvider.filesForTag(tag);
+==== openTag ====
+1517|        vscode.commands.registerCommand('workspaceExplorer.openTag', async (tag?: string) => {
+1518|            if (!collectionPreviewEnabled() || !tag) return;
+1519|            const files = tagsProvider.filesForTag(tag);
+1520|            // Order tag preview cards by basename. TagSortMode's count modes have
+1521|            // no per-file meaning here, so they fall back to ascending name; name
+1522|            // modes honor the chosen direction.
+1523|            const tagSort = tagsProvider.getTagSort();
+1524|            const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
+1525|            const sorted = await sortFilePaths(files, dir);
+1526|            await CollectionPreviewPanel.show(context, `Tag: #${tag}`, sorted);
+1527|        }),
+1528|        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameAsc', () => tagsProvider.setTagSort('nameAsc')),
+1529|        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameDesc', () => tagsProvider.setTagSort('nameDesc')),
+1530|        vscode.commands.registerCommand('workspaceExplorer.tags.sortCountDesc', () => tagsProvider.setTagSort('countDesc')),
