@@ -1050,6 +1050,28 @@ function collectionPreviewEnabled(): boolean {
     return vscode.workspace.getConfiguration('workspaceExplorer').get<boolean>('collectionPreview.enabled', true);
 }
 
+function collectionTintedBackground(): boolean {
+    return vscode.workspace.getConfiguration('workspaceExplorer').get<boolean>('collectionPreview.tintedBackground', true);
+}
+
+// Wrap inline #tags in rendered markdown HTML with a colored pill span. Operates
+// only on text outside HTML tags and skips <pre>/<code> regions so code and
+// attributes (links, hex colors) are untouched. Tags must contain a letter, so
+// pure-numeric refs like "#123" are ignored.
+function highlightTags(html: string): string {
+    let inCode = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (tok) => {
+        if (tok[0] === '<') {
+            if (/^<(pre|code)[\s>]/i.test(tok)) inCode++;
+            else if (/^<\/(pre|code)>/i.test(tok)) inCode = Math.max(0, inCode - 1);
+            return tok;
+        }
+        if (inCode > 0) return tok;
+        return tok.replace(/(^|[\s(\[])#(?=[\w/-]*[A-Za-z])([\w/-]+)/g,
+            (_m, pre, tag) => `${pre}<span class="tag-pill">#${tag}</span>`);
+    });
+}
+
 function escapeHtml(s: string): string {
     return s
         .replace(/&/g, '&amp;')
@@ -1204,7 +1226,7 @@ async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch
         body = '';
     }
     body = stripFrontmatter(body);
-    const rendered = makeTaskCheckboxesInteractive(md.render(body));
+    const rendered = highlightTags(makeTaskCheckboxesInteractive(md.render(body)));
     // Search corpus: filename + raw body text (title + content), lowercased.
     const search = `${filename}\n${body}`.toLowerCase();
     return { path: filePath, title: filename, kind: 'markdown', html: rendered, color, search };
@@ -1377,7 +1399,8 @@ class CollectionPreviewPanel {
             </div>`;
         }).join('\n');
         const empty = cards.length === 0 ? `<div class="note">No items in this collection.</div>` : '';
-        const containerClass = layout === 'compressed' ? 'grid compressed' : 'grid';
+        const tintClass = collectionTintedBackground() ? ' tinted' : '';
+        const containerClass = (layout === 'compressed' ? 'grid compressed' : 'grid') + tintClass;
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1470,11 +1493,12 @@ class CollectionPreviewPanel {
         break-inside: avoid;
         -webkit-column-break-inside: avoid;
         margin: 0 0 14px 0;
-        /* Dim wash of the folder color (--card-accent) over the base card surface,
-           so each card's background matches its left-border / folder color. */
+        /* Base card surface. When the grid has .tinted, a dim wash of the folder
+           color (--card-accent) is mixed in (see .grid.tinted .card below). The
+           colored left border is always shown regardless. */
         --card-base: var(--vscode-editorWidget-background, var(--vscode-editor-background));
         --card-accent: var(--vscode-panel-border);
-        background: color-mix(in srgb, var(--card-accent) 12%, var(--card-base));
+        background: var(--card-base);
         border: 1px solid var(--vscode-panel-border);
         border-left-width: 4px;
         border-left-color: var(--vscode-panel-border);
@@ -1483,6 +1507,20 @@ class CollectionPreviewPanel {
         cursor: pointer;
         overflow: hidden;
         transition: transform 0.08s ease, box-shadow 0.08s ease;
+    }
+    /* Tinted background (setting): dim folder-color wash over the card surface. */
+    .grid.tinted .card { background: color-mix(in srgb, var(--card-accent) 12%, var(--card-base)); }
+    /* #tag pill, colored by the card's folder color. */
+    .tag-pill {
+        display: inline-block;
+        padding: 0 7px;
+        border-radius: 10px;
+        font-size: 0.85em;
+        font-weight: 600;
+        line-height: 1.5;
+        background: color-mix(in srgb, var(--card-accent) 28%, transparent);
+        color: var(--vscode-foreground);
+        white-space: nowrap;
     }
     .card:hover {
         transform: translateY(-2px);
@@ -1599,8 +1637,12 @@ class CollectionPreviewPanel {
     .grid.compressed .card-markdown .card-body::after {
         content: "";
         position: absolute; left: 0; right: 0; bottom: 0; height: 36px;
-        background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--card-accent) 12%, var(--card-base)));
+        background: linear-gradient(to bottom, transparent, var(--card-base));
         pointer-events: none;
+    }
+    /* Fade blends into the tinted surface when the tint setting is on. */
+    .grid.tinted.compressed .card-markdown .card-body::after {
+        background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--card-accent) 12%, var(--card-base)));
     }
 </style>
 </head>

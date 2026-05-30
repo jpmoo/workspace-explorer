@@ -99,6 +99,12 @@
           "default": true,
           "order": 40,
           "description": "When enabled, clicking a folder or tag in the explorer opens a Collection Preview panel showing a card for each markdown note. When disabled, clicking behaves normally (no preview panel)."
+        },
+        "workspaceExplorer.collectionPreview.tintedBackground": {
+          "type": "boolean",
+          "default": true,
+          "order": 41,
+          "description": "Tint each preview card's background with a dim wash of its folder color. The colored left border is always shown regardless of this setting."
         }
       }
     },
