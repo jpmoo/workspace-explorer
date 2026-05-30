@@ -54,6 +54,15 @@ async function sortFilePaths(files: string[], mode: SortMode): Promise<string[]>
     withMtime.sort((a, b) => mode === 'editedAsc' ? a.mtime - b.mtime : b.mtime - a.mtime);
     return withMtime.map((x) => x.f);
 }
+
+// Move pinned files to the front (preserving their order within the already-sorted
+// list), mirroring how the explorer floats pins above the rest of a folder.
+function applyPinOrder(files: string[], pinned: Set<string>): string[] {
+    if (pinned.size === 0) return files;
+    const pins = files.filter((f) => pinned.has(f));
+    const rest = files.filter((f) => !pinned.has(f));
+    return [...pins, ...rest];
+}
 const PINNED_FOLDER_KEY = 'workspaceExplorer.pinnedInFolder';
 const PINNED_TOP_KEY = 'workspaceExplorer.pinnedTop';
 const HIDDEN_KEY = 'workspaceExplorer.hidden';
@@ -555,6 +564,14 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         await this.context.workspaceState.update(PINNED_FOLDER_KEY, all);
         await this.removeFromTopPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
+    }
+    // Every pinned path (top pins + all folder pins), for collection-preview ordering.
+    getAllPinnedPaths(): string[] {
+        const top = this.getPinnedTop();
+        const byFolder = this.context.workspaceState.get<Record<string, string[]>>(PINNED_FOLDER_KEY, {});
+        const folderPins = Object.values(byFolder).flat();
+        return [...top, ...folderPins];
     }
     getPinnedTop(): string[] { return this.context.workspaceState.get<string[]>(PINNED_TOP_KEY, []); }
     async pinToTop(filePath: string): Promise<void> {
@@ -563,11 +580,13 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         await this.context.workspaceState.update(PINNED_TOP_KEY, [...list]);
         await this.removeFromFolderPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
     }
     async unpin(filePath: string): Promise<void> {
         await this.removeFromTopPins(filePath);
         await this.removeFromFolderPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
     }
     private async removeFromTopPins(filePath: string): Promise<void> {
         await this.context.workspaceState.update(PINNED_TOP_KEY, this.getPinnedTop().filter((p) => p !== filePath));
@@ -1540,9 +1559,11 @@ export function activate(context: vscode.ExtensionContext) {
             const run = async () => {
                 const files: string[] = [];
                 await collectMarkdownFiles(uri.fsPath, files, 500);
-                // Order preview cards using the folder's own sort mode (Feature 1).
+                // Order preview cards using the folder's own sort mode (Feature 1),
+                // then float pinned files to the top like the explorer tree does.
                 const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
-                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, sorted);
+                const pinned = new Set([...provider.getPinnedTop(), ...provider.getPinnedInFolder(uri.fsPath)]);
+                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, applyPinOrder(sorted, pinned));
             };
             CollectionPreviewPanel.setSource(run);
             await run();
