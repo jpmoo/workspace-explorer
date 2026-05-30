@@ -6,7 +6,8 @@ An alternate, PKMS-friendly file explorer sidebar for **VS Code / Cursor**, with
 
 Built for note-taking / personal-knowledge-management workflows (Markdown vaults), but works in any workspace.
 
-<img width="1582" height="1034" alt="image" src="https://github.com/user-attachments/assets/e871a756-a2a5-44eb-939a-f1547177f1d8" />
+<img width="1582" height="1034" alt="image" src="https://github.com/user-attachments/assets/3ad2a9cb-bc46-4752-97a3-5981162008fd" />
+
 
 ## Features
 
