@@ -1072,6 +1072,30 @@ function highlightTags(html: string): string {
     });
 }
 
+// Wrap [[wikilinks]] in rendered markdown HTML as clickable spans. Supports
+// [[Note]] and [[Note|alias]]. Resolved targets (a matching note basename exists
+// in noteIndex) carry data-wikilink and are clickable; unresolved ones render
+// dimmed and inert. Skips <pre>/<code> regions like highlightTags.
+function highlightWikilinks(html: string, noteIndex: Set<string>): string {
+    let inCode = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (tok) => {
+        if (tok[0] === '<') {
+            if (/^<(pre|code)[\s>]/i.test(tok)) inCode++;
+            else if (/^<\/(pre|code)>/i.test(tok)) inCode = Math.max(0, inCode - 1);
+            return tok;
+        }
+        if (inCode > 0) return tok;
+        return tok.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (_m, target, alias) => {
+            const name = String(target).trim();
+            const label = escapeHtml(String(alias ?? target).trim());
+            if (noteIndex.has(name.toLowerCase())) {
+                return `<span class="wikilink" data-wikilink="${escapeHtml(name)}">${label}</span>`;
+            }
+            return `<span class="wikilink wikilink-unresolved">${label}</span>`;
+        });
+    });
+}
+
 function escapeHtml(s: string): string {
     return s
         .replace(/&/g, '&amp;')
@@ -1205,7 +1229,14 @@ function makeTaskCheckboxesInteractive(html: string): string {
     });
 }
 
-async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch>): Promise<NoteCard> {
+// Set of all workspace note basenames (no extension, lowercased) for resolving
+// [[wikilinks]]. Built once per board render.
+async function wikilinkIndex(): Promise<Set<string>> {
+    const files = await vscode.workspace.findFiles('**/*.{md,markdown}', '**/node_modules/**');
+    return new Set(files.map((u) => path.basename(u.fsPath, path.extname(u.fsPath)).toLowerCase()));
+}
+
+async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch>, noteIndex: Set<string> = new Set()): Promise<NoteCard> {
     const ext = path.extname(filePath).toLowerCase();
     const color = resolveFolderColor(filePath, iconColors);
     const filename = path.basename(filePath);
@@ -1226,7 +1257,7 @@ async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch
         body = '';
     }
     body = stripFrontmatter(body);
-    const rendered = highlightTags(makeTaskCheckboxesInteractive(md.render(body)));
+    const rendered = highlightWikilinks(highlightTags(makeTaskCheckboxesInteractive(md.render(body))), noteIndex);
     // Search corpus: filename + raw body text (title + content), lowercased.
     const search = `${filename}\n${body}`.toLowerCase();
     return { path: filePath, title: filename, kind: 'markdown', html: rendered, color, search };
@@ -1304,7 +1335,10 @@ class CollectionPreviewPanel {
         const MAX = 500;
         const total = files.length;
         const capped = files.slice(0, MAX);
-        const cards = await Promise.all(capped.map((f) => buildNoteCard(f, iconColors)));
+        // Index of all workspace note basenames (lowercased) so [[wikilinks]] can
+        // be marked resolved/unresolved at render time.
+        const noteIndex = await wikilinkIndex();
+        const cards = await Promise.all(capped.map((f) => buildNoteCard(f, iconColors, noteIndex)));
 
         // localResourceRoots must include workspace folders so images load via asWebviewUri.
         const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri);
@@ -1332,6 +1366,12 @@ class CollectionPreviewPanel {
                     && typeof msg.index === 'number'
                     && typeof msg.checked === 'boolean') {
                     await toggleTaskInFile(msg.path, msg.index, msg.checked);
+                } else if (msg.type === 'openWikilink' && typeof msg.target === 'string') {
+                    const want = msg.target.trim().toLowerCase();
+                    const matches = await vscode.workspace.findFiles('**/*.{md,markdown}', '**/node_modules/**');
+                    const hit = matches.find((u) => path.basename(u.fsPath, path.extname(u.fsPath)).toLowerCase() === want);
+                    if (hit) vscode.commands.executeCommand('vscode.open', hit);
+                    else vscode.window.showInformationMessage(`No note named "${msg.target}" found.`);
                 } else if (msg.type === 'addNote'
                     && typeof msg.title === 'string'
                     && typeof msg.text === 'string') {
@@ -1521,6 +1561,20 @@ class CollectionPreviewPanel {
         background: color-mix(in srgb, var(--card-accent) 28%, transparent);
         color: var(--vscode-foreground);
         white-space: nowrap;
+    }
+    /* [[wikilink]] — clickable internal note link. */
+    .wikilink {
+        color: var(--vscode-textLink-foreground);
+        cursor: pointer;
+        text-decoration: none;
+        border-bottom: 1px dotted var(--vscode-textLink-foreground);
+    }
+    .wikilink:hover { text-decoration: underline; }
+    .wikilink-unresolved {
+        color: var(--vscode-disabledForeground);
+        cursor: default;
+        border-bottom: 1px dashed var(--vscode-disabledForeground);
+        opacity: 0.8;
     }
     .card:hover {
         transform: translateY(-2px);
@@ -1748,6 +1802,14 @@ class CollectionPreviewPanel {
             };
             searchInput.addEventListener('input', applyFilter);
         }
+
+        // Wikilink clicks: open the target note (don't bubble to the card opener).
+        document.querySelectorAll('.wikilink[data-wikilink]').forEach((el) => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                vscode.postMessage({ type: 'openWikilink', target: el.getAttribute('data-wikilink') });
+            });
+        });
 
         document.querySelectorAll('.task-checkbox').forEach((cb) => {
             cb.addEventListener('click', (e) => { e.stopPropagation(); });
