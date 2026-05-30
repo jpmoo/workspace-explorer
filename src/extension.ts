@@ -163,9 +163,14 @@ class FileNode extends vscode.TreeItem {
                 title: 'Open File',
                 arguments: [uri],
             };
+            // Pinned files get the native VS Code pin icon (cleaner than an emoji).
+            // Top pins use the filled pin to read as "higher priority".
+            if (pinned) {
+                this.iconPath = new vscode.ThemeIcon(pinned === 'top' ? 'pinned' : 'pin');
+            }
         }
         const bits: string[] = [];
-        if (pinned) bits.push(pinned === 'top' ? '📌 top' : '📌');
+        if (pinned === 'top') bits.push('top');
         if (hidden) bits.push('hidden');
         if (bits.length) this.description = bits.join(' · ');
     }
@@ -1194,6 +1199,9 @@ async function toggleTaskInFile(filePath: string, index: number, checked: boolea
     }
 }
 
+// Small filled pin badge shown in the corner of pinned cards.
+const PIN_BADGE_SVG = `<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M9.2 1.2a1 1 0 0 1 1.4 0l4.2 4.2a1 1 0 0 1 0 1.4l-.5.5a2 2 0 0 1-2.4.3l-1.2 2.9-1.8 1.8a.8.8 0 0 1-1.1 0L5.3 10.3l-3.4 3.4a.6.6 0 0 1-.9-.9l3.4-3.4-2.1-2.1a.8.8 0 0 1 0-1.1l1.8-1.8 2.9-1.2a2 2 0 0 1 .3-2.4z"/></svg>`;
+
 // Inline SVG glyphs used for non-markdown, non-image cards.
 function fileGlyphSvg(ext: string): string {
     if (ext === '.pdf') {
@@ -1228,8 +1236,9 @@ class CollectionPreviewPanel {
         if (this.panel && this.reload) await this.reload();
     }
 
-    static async show(context: vscode.ExtensionContext, heading: string, files: string[]): Promise<void> {
+    static async show(context: vscode.ExtensionContext, heading: string, files: string[], pinned?: Set<string>): Promise<void> {
         const iconColors = context.workspaceState.get<Record<string, Swatch>>(ICON_COLOR_KEY, {});
+        const pinnedSet = pinned ?? new Set<string>();
         const MAX = 500;
         const total = files.length;
         const capped = files.slice(0, MAX);
@@ -1265,7 +1274,7 @@ class CollectionPreviewPanel {
             });
         }
         this.panel.title = heading;
-        this.panel.webview.html = this.render(this.panel.webview, heading, cards, total, MAX, this.getLayout(context));
+        this.panel.webview.html = this.render(this.panel.webview, heading, cards, total, MAX, this.getLayout(context), pinnedSet);
         this.panel.reveal(this.panel.viewColumn ?? vscode.ViewColumn.Active);
     }
 
@@ -1276,6 +1285,7 @@ class CollectionPreviewPanel {
         total: number,
         max: number,
         layout: 'expanded' | 'compressed',
+        pinnedSet: Set<string>,
     ): string {
         const nonce = makeNonce();
         const truncated = total > max
@@ -1306,9 +1316,11 @@ class CollectionPreviewPanel {
                     <div class="card-body md-body">${c.html}</div>`;
             }
             // file-kind cards never expand: always rendered at compressed size.
-            const kindClass = `card card-${c.kind}`;
+            const isPinned = pinnedSet.has(c.path);
+            const kindClass = `card card-${c.kind}${isPinned ? ' card-pinned' : ''}`;
+            const badge = isPinned ? `<div class="pin-badge" title="Pinned">${PIN_BADGE_SVG}</div>` : '';
             return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-vscode-context="${ctx}" style="border-left-color: ${accent};">
-                ${inner}
+                ${badge}${inner}
             </div>`;
         }).join('\n');
         const empty = cards.length === 0 ? `<div class="note">No items in this collection.</div>` : '';
@@ -1384,6 +1396,30 @@ class CollectionPreviewPanel {
         text-overflow: ellipsis;
     }
     .card-body { position: relative; }
+
+    /* ---- Pinned cards: accent ring + corner badge ---- */
+    .card-pinned {
+        border-color: var(--vscode-focusBorder);
+        box-shadow: 0 0 0 1px var(--vscode-focusBorder) inset;
+    }
+    .pin-badge {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        color: var(--vscode-button-foreground);
+        background: var(--vscode-focusBorder);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        transform: rotate(45deg);
+    }
+    /* Keep the title clear of the badge. */
+    .card-pinned .card-title { padding-right: 22px; }
 
     /* ---- Markdown body: shrunken rendered-preview look ---- */
     .md-body { font-size: 0.8em; line-height: 1.45; opacity: 0.92; word-break: break-word; }
@@ -1563,7 +1599,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // then float pinned files to the top like the explorer tree does.
                 const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
                 const pinned = new Set([...provider.getPinnedTop(), ...provider.getPinnedInFolder(uri.fsPath)]);
-                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, applyPinOrder(sorted, pinned));
+                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, applyPinOrder(sorted, pinned), pinned);
             };
             CollectionPreviewPanel.setSource(run);
             await run();
@@ -1579,7 +1615,7 @@ export function activate(context: vscode.ExtensionContext) {
                 const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
                 const sorted = await sortFilePaths(files, dir);
                 const pinned = new Set(provider.getAllPinnedPaths());
-                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, applyPinOrder(sorted, pinned));
+                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, applyPinOrder(sorted, pinned), pinned);
             };
             CollectionPreviewPanel.setSource(run);
             await run();
