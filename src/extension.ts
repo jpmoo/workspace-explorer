@@ -176,6 +176,21 @@ function coerceToFileNode(arg: unknown): FileNode | undefined {
     return undefined;
 }
 
+// Move a file/folder into destDir, refusing to overwrite. Uses a WorkspaceEdit so
+// open editors follow the move. Returns true on success.
+async function moveEntry(src: vscode.Uri, destDir: vscode.Uri): Promise<boolean> {
+    const dest = vscode.Uri.joinPath(destDir, path.basename(src.fsPath));
+    if (await pathExists(dest)) {
+        vscode.window.showErrorMessage(`'${path.basename(src.fsPath)}' already exists in the destination.`);
+        return false;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(src, dest, { overwrite: false });
+    const ok = await vscode.workspace.applyEdit(edit);
+    if (!ok) vscode.window.showErrorMessage(`Move failed: ${path.basename(src.fsPath)}`);
+    return ok;
+}
+
 class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vscode.FileDecorationProvider, vscode.TreeDragAndDropController<FileNode> {
     readonly dragMimeTypes = [DND_MIME];
     readonly dropMimeTypes = [DND_MIME];
