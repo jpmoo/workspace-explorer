@@ -1393,9 +1393,10 @@ class CollectionPreviewPanel {
         font-family: var(--vscode-font-family);
         font-size: var(--vscode-font-size);
     }
-    h1 { font-size: 1.2em; margin: 0 0 12px 0; font-weight: 600; }
-    .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-    .header h1 { margin: 0; }
+    h1 { font-size: 1.2em; margin: 0 0 10px 0; font-weight: 600; }
+    /* Toolbar: search pinned left, action buttons pinned right. */
+    .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
     .layout-toggle {
         background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
         color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
@@ -1406,7 +1407,6 @@ class CollectionPreviewPanel {
         font-size: 0.85em;
     }
     .layout-toggle:hover { opacity: 0.85; }
-    .header-actions { display: flex; align-items: center; gap: 8px; }
     .search-input {
         background: var(--vscode-input-background);
         color: var(--vscode-input-foreground);
@@ -1414,10 +1414,12 @@ class CollectionPreviewPanel {
         border-radius: 6px;
         padding: 4px 10px;
         font-size: 0.85em;
-        min-width: 200px;
+        flex: 1 1 auto;
+        max-width: 360px;
     }
     .search-input::placeholder { color: var(--vscode-input-placeholderForeground); }
-    .card[hidden] { display: none; }
+    /* [hidden] must beat .grid.compressed .card and .quickadd's display rules. */
+    .card[hidden], .quickadd[hidden], .note[hidden] { display: none !important; }
     .header-btn {
         background: var(--vscode-button-background);
         color: var(--vscode-button-foreground);
@@ -1599,12 +1601,12 @@ class CollectionPreviewPanel {
 </style>
 </head>
 <body>
-    <div class="header">
-        <h1>${escapeHtml(heading)}</h1>
-        <div class="header-actions">
-            <input type="search" id="search" class="search-input" placeholder="Search title & content…" />
-            ${canAddNote ? `<button class="header-btn" id="addNoteBtn">+ Add note</button>` : ''}
+    <h1>${escapeHtml(heading)}</h1>
+    <div class="toolbar">
+        <input type="search" id="search" class="search-input" placeholder="Search title & content…" />
+        <div class="toolbar-right">
             <button class="layout-toggle" id="layoutToggle"></button>
+            ${canAddNote ? `<button class="header-btn" id="addNoteBtn">+ Add note</button>` : ''}
         </div>
     </div>
     ${canAddNote ? `
