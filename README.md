@@ -24,12 +24,16 @@ Click a **folder** or a **tag** to open a scrollable card board of its notes in 
 
 - **True masonry layout** — cards pack top-to-bottom in responsive columns with no row gaps.
 - **Matches your sort** — cards follow the source folder's sort mode (or the current tag sort).
+- **Live search** — filter the board as you type by note title **and** content. Available for both folders and tags.
+- **Quick add note** (folders only) — an "Add note" button opens an inline title + text form to create a new `.md` in that folder. No title falls back to a date/time name.
 - **Expand / Compress toggle** — view cards at their natural height, or truncate them all to a uniform size. Compressed cards stay individually scrollable.
 - **Rendered Markdown previews** — notes render as (smaller-scale) preview Markdown, with **interactive task checkboxes** that write back to the source file.
 - **Images** — shown as a centered slice at a fixed height when expanded, shrunk to fit when compressed.
 - **PDFs and other files** — shown as a compact file thumbnail.
 - **Cards are colored** by their nearest colored ancestor folder.
 - **Card titles** show the filename (with extension), middle-truncated when long.
+- **Pinned notes** float to the top of the board with a pin badge, mirroring the explorer's pinning.
+- **Auto-refresh** — the board updates on filesystem changes (create/rename/move/delete), sort changes, and pin changes.
 - **Right-click a card** for the same actions as right-clicking the file in the explorer — open to side, pin/unpin, hide/unhide, rename, move, duplicate, delete, reveal in OS, open in terminal, and copy (relative) path.
 
 ## Install
@@ -43,8 +47,8 @@ npm run compile
 npx @vscode/vsce package --allow-missing-repository
 
 # Install the resulting .vsix
-code   --install-extension workspace-explorer-1.0.0.vsix --force   # VS Code
-cursor --install-extension workspace-explorer-1.0.0.vsix --force   # Cursor
+code   --install-extension workspace-explorer-1.1.0.vsix --force   # VS Code
+cursor --install-extension workspace-explorer-1.1.0.vsix --force   # Cursor
 ```
 
 Then reload the window. Open the **Workspace Explorer** view in the sidebar.
