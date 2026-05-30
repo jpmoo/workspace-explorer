@@ -1276,10 +1276,10 @@ class CollectionPreviewPanel {
                     <div class="card-body img-body"><img class="card-img" src="${src}" alt="${escapeHtml(c.title)}"></div>`;
             } else if (c.kind === 'file') {
                 const ext = path.extname(c.path).toLowerCase();
+                // Title above shows the filename; the body is just the glyph.
                 inner = `<div class="card-title" title="${escapeHtml(c.title)}">${escapeHtml(truncateFilename(c.title))}</div>
                     <div class="card-body file-body">
                         <div class="file-glyph">${fileGlyphSvg(ext)}</div>
-                        <div class="file-name">${escapeHtml(truncateFilename(c.title))}</div>
                     </div>`;
             } else {
                 // markdown
@@ -1350,9 +1350,16 @@ class CollectionPreviewPanel {
         box-shadow: 0 4px 14px rgba(0,0,0,0.35);
     }
     .card-title {
-        font-weight: 600;
-        margin-bottom: 6px;
-        /* Filename is already middle-truncated; keep it to a single line. */
+        /* Small uppercase label so the filename reads as a header, not body text. */
+        font-size: 0.7em;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--vscode-descriptionForeground);
+        margin-bottom: 8px;
+        /* Filename is already middle-truncated; keep it to a single line and never
+           let the flex column crush it (fixes the title vanishing in compress mode). */
+        flex: 0 0 auto;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -1392,7 +1399,6 @@ class CollectionPreviewPanel {
         gap: 8px; height: 128px; opacity: 0.85;
     }
     .file-glyph { color: var(--vscode-foreground); opacity: 0.7; }
-    .file-name { font-size: 0.8em; text-align: center; word-break: break-word; }
 
     /* ---- Compressed mode: EVERY card is the exact same total size. ----
        Fix the height on the .card itself (not just the body) and lay it out as a
