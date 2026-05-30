@@ -1371,20 +1371,28 @@ class CollectionPreviewPanel {
     .file-glyph { color: var(--vscode-foreground); opacity: 0.7; }
     .file-name { font-size: 0.8em; text-align: center; word-break: break-word; }
 
-    /* ---- Compressed mode: uniform fixed card height with soft fade-out. ---- */
-    /* Chosen object-fit: cover for images here too (MindChuk-style filled thumbnails). */
-    .grid.compressed .card-markdown .card-body {
-        max-height: 160px;
+    /* ---- Compressed mode: EVERY card is the exact same total size. ----
+       Fix the height on the .card itself (not just the body) and lay it out as a
+       flex column: the title takes its natural height and the body fills the rest.
+       This keeps all cards identical regardless of content — including image and
+       file cards, whose media fills the remaining space and crops to fill. */
+    .grid.compressed .card {
+        height: 200px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    }
+    .grid.compressed .card .card-body {
+        flex: 1 1 auto;
+        min-height: 0;          /* allow the flex child to shrink so overflow works */
+        max-height: none;
         overflow-y: auto;
         overflow-x: hidden;
         position: relative;
     }
-    .grid.compressed .card-image .card-body {
-        max-height: 160px;
-        overflow: hidden;
-        position: relative;
-    }
-    .grid.compressed .card-image .img-body { height: 160px; }
+    /* Media fills the leftover space (MindChuk-style filled thumbnails). */
+    .grid.compressed .card-image .img-body,
+    .grid.compressed .card-file .file-body { height: 100%; }
     .grid.compressed .card-markdown .card-body::after {
         content: "";
         position: absolute; left: 0; right: 0; bottom: 0; height: 36px;
