@@ -2,7 +2,7 @@
   "name": "workspace-explorer",
   "displayName": "Workspace Explorer",
   "description": "An alternate workspace file explorer with per-folder sorting, pinned files, hidden files, and folder coloring.",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "local",
   "engines": {
     "vscode": "^1.80.0"
