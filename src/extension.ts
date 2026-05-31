@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import MarkdownIt = require('markdown-it');
 
 type SortMode = 'nameAsc' | 'nameDesc' | 'editedAsc' | 'editedDesc';
+type TagSortMode = 'nameAsc' | 'nameDesc' | 'countDesc' | 'countAsc';
 type Swatch = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'gray';
 const SWATCHES: Swatch[] = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'];
 
@@ -15,8 +17,52 @@ const THEME_COLOR_BY_SWATCH: Record<Swatch, string> = {
     gray: 'descriptionForeground',
 };
 
+// Concrete CSS colors for webview rendering (ThemeColor objects can't be used in HTML/CSS).
+const CSS_COLOR_BY_SWATCH: Record<Swatch, string> = {
+    red: '#e05561',
+    orange: '#d18f52',
+    yellow: '#e0c050',
+    green: '#5bbf6a',
+    blue: '#4e9bd6',
+    purple: '#a06fd0',
+    gray: '#8a8a8a',
+};
+
 const DEFAULT_SORT: SortMode = 'nameAsc';
 const SORTS_KEY = 'workspaceExplorer.sorts';
+const TAG_SORT_KEY = 'workspaceExplorer.tagSort';
+const DEFAULT_TAG_SORT: TagSortMode = 'nameAsc';
+
+// Compare two basenames per the name direction of a SortMode. Shared so the
+// collection preview orders cards exactly like the explorer's directory listing.
+function compareByName(aName: string, bName: string, mode: SortMode): number {
+    return mode === 'nameDesc' ? bName.localeCompare(aName) : aName.localeCompare(bName);
+}
+
+// Sort a flat list of file paths by SortMode, statting files for the edited
+// modes (via vscode.workspace.fs, matching readDir's mtime source). Mirrors the
+// explorer's per-file comparison so preview cards match the folder ordering.
+async function sortFilePaths(files: string[], mode: SortMode): Promise<string[]> {
+    if (mode === 'nameAsc' || mode === 'nameDesc') {
+        return [...files].sort((a, b) => compareByName(path.basename(a), path.basename(b), mode));
+    }
+    const withMtime = await Promise.all(files.map(async (f) => {
+        let mtime = 0;
+        try { mtime = (await vscode.workspace.fs.stat(vscode.Uri.file(f))).mtime; } catch { mtime = 0; }
+        return { f, mtime };
+    }));
+    withMtime.sort((a, b) => mode === 'editedAsc' ? a.mtime - b.mtime : b.mtime - a.mtime);
+    return withMtime.map((x) => x.f);
+}
+
+// Move pinned files to the front (preserving their order within the already-sorted
+// list), mirroring how the explorer floats pins above the rest of a folder.
+function applyPinOrder(files: string[], pinned: Set<string>): string[] {
+    if (pinned.size === 0) return files;
+    const pins = files.filter((f) => pinned.has(f));
+    const rest = files.filter((f) => !pinned.has(f));
+    return [...pins, ...rest];
+}
 const PINNED_FOLDER_KEY = 'workspaceExplorer.pinnedInFolder';
 const PINNED_TOP_KEY = 'workspaceExplorer.pinnedTop';
 const HIDDEN_KEY = 'workspaceExplorer.hidden';
@@ -26,6 +72,7 @@ const ICON_COLOR_KEY = 'workspaceExplorer.iconColor';   // folderPath -> Swatch
 const TEXT_COLOR_KEY = 'workspaceExplorer.textColor';   // folderPath -> Swatch (inherited)
 const FOLDER_ORDER_KEY = 'workspaceExplorer.folderOrder'; // parentPath -> ordered child folder names
 const EXPANDED_FOLDERS_KEY = 'workspaceExplorer.expandedFolders'; // string[] of expanded folder paths
+const COLLECTION_LAYOUT_KEY = 'workspaceExplorer.collectionPreview.layout'; // 'expanded' | 'compressed'
 const DND_MIME = 'application/vnd.code.tree.workspaceexplorer';
 
 function isHiddenAncestry(filePath: string, hiddenSet: Set<string>, rootPath: string | undefined): boolean {
@@ -51,6 +98,22 @@ function combineIncludeGlob(patterns: string[], fallback: string): string {
     if (!patterns || patterns.length === 0) return fallback;
     if (patterns.length === 1) return patterns[0];
     return `{${patterns.join(',')}}`;
+}
+
+// VS Code's TreeView throws "Element with id <x> is already registered" if two
+// materialized siblings share a TreeItem.id (we set id = uri.fsPath). Guarantee
+// uniqueness by dropping any later node whose fsPath was already emitted, while
+// preserving the intended ordering (first occurrence wins, e.g. a pinned node
+// kept ahead of its would-be duplicate in the normal listing).
+function dedupeByPath(nodes: FileNode[]): FileNode[] {
+    const seen = new Set<string>();
+    const out: FileNode[] = [];
+    for (const n of nodes) {
+        if (seen.has(n.uri.fsPath)) continue;
+        seen.add(n.uri.fsPath);
+        out.push(n);
+    }
+    return out;
 }
 
 class FileNode extends vscode.TreeItem {
@@ -84,6 +147,15 @@ class FileNode extends vscode.TreeItem {
             const base = iconColor ?? 'default';
             const variant = isExpanded ? `${base}-open.svg` : `${base}.svg`;
             this.iconPath = vscode.Uri.joinPath(mediaRoot, 'folders', variant);
+            // Wire a single-click command to open the Collection Preview. Folders remain
+            // expandable; in VS Code a command on an expandable TreeItem fires on click while
+            // the twistie still toggles expand/collapse, so this preserves existing behavior.
+            // The handler itself is a no-op when the collectionPreview.enabled setting is off.
+            this.command = {
+                command: 'workspaceExplorer.openFolder',
+                title: 'Open Collection Preview',
+                arguments: [uri],
+            };
         } else {
             this.contextValue = hidden ? 'hiddenFile' : (pinned ? 'pinnedFile' : 'file');
             this.command = {
@@ -91,105 +163,162 @@ class FileNode extends vscode.TreeItem {
                 title: 'Open File',
                 arguments: [uri],
             };
+            // Pinned files get the native VS Code pin icon (cleaner than an emoji).
+            // Top pins use the filled pin to read as "higher priority".
+            if (pinned) {
+                this.iconPath = new vscode.ThemeIcon(pinned === 'top' ? 'pinned' : 'pin');
+            }
         }
         const bits: string[] = [];
-        if (pinned) bits.push(pinned === 'top' ? '📌 top' : '📌');
+        if (pinned === 'top') bits.push('top');
         if (hidden) bits.push('hidden');
         if (bits.length) this.description = bits.join(' · ');
     }
 }
 
+// Webview preview-card context menus pass a `data-vscode-context` object
+// ({ filePath, webviewSection, ... }) as the command argument instead of a FileNode.
+// This coerces either form into a FileNode so the explorer handlers work for both.
+// Preview cards are always files (isDirectory=false).
+function coerceToFileNode(arg: unknown): FileNode | undefined {
+    if (arg instanceof FileNode) return arg;
+    if (arg && typeof arg === 'object' && typeof (arg as any).filePath === 'string') {
+        const fp = (arg as any).filePath as string;
+        const uri = vscode.Uri.file(fp);
+        return new FileNode(uri, false, path.dirname(fp), null, false, false, undefined, uri);
+    }
+    return undefined;
+}
+
+// Move a file/folder into destDir, refusing to overwrite. Uses a WorkspaceEdit so
+// open editors follow the move. Returns true on success.
+async function moveEntry(src: vscode.Uri, destDir: vscode.Uri): Promise<boolean> {
+    const dest = vscode.Uri.joinPath(destDir, path.basename(src.fsPath));
+    if (await pathExists(dest)) {
+        vscode.window.showErrorMessage(`'${path.basename(src.fsPath)}' already exists in the destination.`);
+        return false;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(src, dest, { overwrite: false });
+    const ok = await vscode.workspace.applyEdit(edit);
+    if (!ok) vscode.window.showErrorMessage(`Move failed: ${path.basename(src.fsPath)}`);
+    return ok;
+}
+
 class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vscode.FileDecorationProvider, vscode.TreeDragAndDropController<FileNode> {
-    readonly dragMimeTypes = [DND_MIME];
-    readonly dropMimeTypes = [DND_MIME];
+    // Accept our internal drags (files + folders) plus `text/uri-list`, which is
+    // what VS Code's built-in explorer and the OS use when dragging files in.
+    readonly dragMimeTypes = [DND_MIME, 'text/uri-list'];
+    readonly dropMimeTypes = [DND_MIME, 'text/uri-list'];
 
     handleDrag(source: readonly FileNode[], data: vscode.DataTransfer): void {
-        // Only allow folder drags (we reorder folders within their parent).
-        const folders = source.filter((n) => n.isDirectory).map((n) => n.uri.fsPath);
-        if (folders.length === 0) return;
-        data.set(DND_MIME, new vscode.DataTransferItem(JSON.stringify(folders)));
+        // Carry the dir flag so the drop side knows folders without statting.
+        const items = source.map((n) => ({ p: n.uri.fsPath, d: n.isDirectory }));
+        if (items.length === 0) return;
+        data.set(DND_MIME, new vscode.DataTransferItem(JSON.stringify(items)));
+        // Expose a uri-list too so items can be dragged into other views/apps.
+        data.set('text/uri-list', new vscode.DataTransferItem(source.map((n) => n.uri.toString()).join('\r\n')));
     }
 
     async handleDrop(target: FileNode | undefined, data: vscode.DataTransfer): Promise<void> {
-        const item = data.get(DND_MIME);
-        if (!item) return;
-        let payload: string[];
-        try { payload = JSON.parse(await item.asString()); } catch { return; }
-        if (!Array.isArray(payload) || payload.length === 0) return;
+        const destDir = this.resolveDropDir(target);
+        if (!destDir) return;
 
-        // All dragged folders must share a parent for reordering to make sense.
-        const parents = new Set(payload.map((p) => path.dirname(p)));
-        if (parents.size !== 1) {
-            vscode.window.showWarningMessage('Workspace Explorer: can only reorder folders that share the same parent.');
+        // Internal drag within the workspace: always MOVE items into the destination
+        // folder. Folder reordering is done via the Move Up / Move Down context-menu
+        // commands instead, so a drag is unambiguous and folders auto-expand normally.
+        const internal = data.get(DND_MIME);
+        if (internal) {
+            let payload: { p: string; d: boolean }[];
+            try { payload = JSON.parse(await internal.asString()); } catch { return; }
+            if (!Array.isArray(payload) || payload.length === 0) return;
+
+            let moved = false;
+            for (const it of payload) {
+                if (this.isInvalidMove(it.p, destDir)) continue;
+                if (await moveEntry(vscode.Uri.file(it.p), destDir)) moved = true;
+            }
+            if (moved) this.refresh();
             return;
         }
-        const sourceParent = [...parents][0];
 
-        // Determine drop parent: dropping on a folder = drop inside it; dropping on a file = into its folder; undefined = workspace root.
-        let dropParent: string;
-        let beforeName: string | undefined;
-        if (!target) {
-            dropParent = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        } else if (target.isDirectory) {
-            // If target folder is a sibling of source, treat as "insert before this sibling".
-            if (path.dirname(target.uri.fsPath) === sourceParent) {
-                dropParent = sourceParent;
-                beforeName = path.basename(target.uri.fsPath);
+        // External drag (from VS Code's file explorer or the OS): move items that
+        // already live in the workspace, copy in ones from outside.
+        const uriList = await data.get('text/uri-list')?.asString();
+        if (!uriList) return;
+        const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+        const isInsideWorkspace = (p: string) => roots.some((r) => p === r || p.startsWith(r + path.sep));
+
+        let changed = false;
+        for (const line of uriList.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            let src: vscode.Uri;
+            try { src = vscode.Uri.parse(trimmed, true); } catch { continue; }
+            if (src.scheme !== 'file' || this.isInvalidMove(src.fsPath, destDir)) continue;
+
+            if (isInsideWorkspace(src.fsPath)) {
+                if (await moveEntry(src, destDir)) changed = true;
             } else {
-                // Otherwise interpret as "drop inside this folder" — but we don't support cross-parent moves yet.
-                vscode.window.showWarningMessage('Workspace Explorer: drag-and-drop only reorders folders within the same parent (filesystem moves are not yet supported).');
-                return;
-            }
-        } else {
-            // Dropped on a file: place at the end of that file's folder.
-            dropParent = path.dirname(target.uri.fsPath);
-            if (dropParent !== sourceParent) {
-                vscode.window.showWarningMessage('Workspace Explorer: drag-and-drop only reorders folders within the same parent.');
-                return;
+                const dest = vscode.Uri.joinPath(destDir, path.basename(src.fsPath));
+                if (await pathExists(dest)) {
+                    vscode.window.showErrorMessage(`'${path.basename(src.fsPath)}' already exists in the destination.`);
+                    continue;
+                }
+                try { await vscode.workspace.fs.copy(src, dest, { overwrite: false }); changed = true; }
+                catch (e: any) { vscode.window.showErrorMessage(`Copy failed: ${e?.message ?? e}`); }
             }
         }
-        if (dropParent !== sourceParent) return;
-
-        await this.reorderFolders(sourceParent, payload.map((p) => path.basename(p)), beforeName);
+        if (changed) this.refresh();
     }
 
-    private async reorderFolders(parent: string, movingNames: string[], beforeName: string | undefined): Promise<void> {
-        // Build current ordering of all child folder names on disk.
+    // Drop onto a folder targets that folder; onto a file targets its parent;
+    // onto empty space targets the workspace root.
+    private resolveDropDir(target: FileNode | undefined): vscode.Uri | undefined {
+        if (!target) return vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (target.isDirectory) return target.uri;
+        return vscode.Uri.file(path.dirname(target.uri.fsPath));
+    }
+
+    // Reject no-op moves (already in destDir) and moving a folder into itself/a descendant.
+    private isInvalidMove(srcPath: string, destDir: vscode.Uri): boolean {
+        if (path.dirname(srcPath) === destDir.fsPath) return true;
+        const d = destDir.fsPath;
+        return d === srcPath || d.startsWith(srcPath + path.sep);
+    }
+
+    getFolderOrder(parent: string): string[] | undefined {
+        const all = this.context.workspaceState.get<Record<string, string[]>>(FOLDER_ORDER_KEY, {});
+        return all[parent];
+    }
+
+    // Shift a folder one slot up or down among its siblings in the persisted
+    // custom order. Builds the current order exactly as readDir displays it
+    // (saved order first, then unrecorded dirs appended by localeCompare).
+    async moveFolderInSiblings(folderPath: string, direction: 'up' | 'down'): Promise<void> {
+        const parent = path.dirname(folderPath);
+        const name = path.basename(folderPath);
         let entries: [string, vscode.FileType][];
         try { entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(parent)); } catch { return; }
         const dirNames = entries.filter(([_, t]) => t === vscode.FileType.Directory).map(([n]) => n);
 
         const all = this.context.workspaceState.get<Record<string, string[]>>(FOLDER_ORDER_KEY, {});
         const saved = all[parent] ?? [];
-        // Start from saved order, then append any on-disk dirs not yet recorded, in default sort order.
-        const recorded = new Set(saved);
         const seenOnDisk = new Set(dirNames);
-        let current = saved.filter((n) => seenOnDisk.has(n));
-        const newcomers = dirNames.filter((n) => !recorded.has(n));
-        newcomers.sort((a, b) => a.localeCompare(b));
-        current = [...current, ...newcomers];
+        const recorded = new Set(saved);
+        let order = saved.filter((n) => seenOnDisk.has(n));
+        const newcomers = dirNames.filter((n) => !recorded.has(n)).sort((a, b) => a.localeCompare(b));
+        order = [...order, ...newcomers];
 
-        // Remove moving names from current.
-        const movingSet = new Set(movingNames);
-        current = current.filter((n) => !movingSet.has(n));
+        const i = order.indexOf(name);
+        if (i < 0) return;
+        const j = direction === 'up' ? i - 1 : i + 1;
+        if (j < 0 || j >= order.length) return; // already at an edge
+        [order[i], order[j]] = [order[j], order[i]];
 
-        // Insert moving names at the right spot.
-        if (beforeName) {
-            const idx = current.indexOf(beforeName);
-            if (idx >= 0) current.splice(idx, 0, ...movingNames);
-            else current.push(...movingNames);
-        } else {
-            current.push(...movingNames);
-        }
-
-        all[parent] = current;
+        all[parent] = order;
         await this.context.workspaceState.update(FOLDER_ORDER_KEY, all);
         this.refresh();
-    }
-
-    getFolderOrder(parent: string): string[] | undefined {
-        const all = this.context.workspaceState.get<Record<string, string[]>>(FOLDER_ORDER_KEY, {});
-        return all[parent];
     }
 
 
@@ -205,8 +334,18 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         return vscode.Uri.joinPath(this.context.extensionUri, 'media');
     }
 
+    // Full refresh including decorations — use after color changes or explicit refresh.
     refresh(): void {
         this._onDidChangeTreeData.fire();
+        this._onDidChangeFileDecorations.fire(undefined);
+    }
+
+    // Tree-only refresh — use for filesystem changes so text-color decorations don't flash.
+    refreshTree(): void {
+        this._onDidChangeTreeData.fire();
+    }
+
+    refreshDecorations(): void {
         this._onDidChangeFileDecorations.fire(undefined);
     }
 
@@ -294,10 +433,10 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
             const filtered = children.filter(
                 (c) => !(!c.isDirectory && topPins.includes(c.uri.fsPath)),
             );
-            return [...pinnedFileNodes, ...filtered];
+            return dedupeByPath([...pinnedFileNodes, ...filtered]);
         }
 
-        if (element.isDirectory) return this.readDir(element.uri);
+        if (element.isDirectory) return dedupeByPath(await this.readDir(element.uri));
         return [];
     }
 
@@ -380,18 +519,28 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
             return new FileNode(i.uri, isDir, dir.fsPath, pinned, isHidden, expandAll, iconColor, this.mediaRoot, wasExpanded);
         };
 
-        return [...folderPinned.map(toNode), ...dirs.map(toNode), ...regular.map(toNode)];
+        return dedupeByPath([...folderPinned.map(toNode), ...dirs.map(toNode), ...regular.map(toNode)]);
     }
 
     // ---- persistence: sort ----
     getSortMode(folderPath: string): SortMode {
         return (this.context.workspaceState.get<Record<string, SortMode>>(SORTS_KEY, {}))[folderPath] ?? DEFAULT_SORT;
     }
+    // True only if some folder sorts by mtime, so a content edit can change ordering.
+    // Used to skip tree refreshes (and the decoration repaint flash) while typing
+    // when nothing is actually mtime-sorted.
+    hasEditedSort(): boolean {
+        if (DEFAULT_SORT === 'editedAsc' || DEFAULT_SORT === 'editedDesc') return true;
+        const sorts = this.context.workspaceState.get<Record<string, SortMode>>(SORTS_KEY, {});
+        return Object.values(sorts).some(m => m === 'editedAsc' || m === 'editedDesc');
+    }
     async setSortMode(folderPath: string, mode: SortMode): Promise<void> {
         const sorts = this.context.workspaceState.get<Record<string, SortMode>>(SORTS_KEY, {});
         sorts[folderPath] = mode;
         await this.context.workspaceState.update(SORTS_KEY, sorts);
         this.refresh();
+        // Re-order any open collection board to match the new sort.
+        void CollectionPreviewPanel.refresh();
     }
 
     // ---- pins ----
@@ -407,6 +556,14 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         await this.context.workspaceState.update(PINNED_FOLDER_KEY, all);
         await this.removeFromTopPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
+    }
+    // Every pinned path (top pins + all folder pins), for collection-preview ordering.
+    getAllPinnedPaths(): string[] {
+        const top = this.getPinnedTop();
+        const byFolder = this.context.workspaceState.get<Record<string, string[]>>(PINNED_FOLDER_KEY, {});
+        const folderPins = Object.values(byFolder).flat();
+        return [...top, ...folderPins];
     }
     getPinnedTop(): string[] { return this.context.workspaceState.get<string[]>(PINNED_TOP_KEY, []); }
     async pinToTop(filePath: string): Promise<void> {
@@ -415,11 +572,13 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         await this.context.workspaceState.update(PINNED_TOP_KEY, [...list]);
         await this.removeFromFolderPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
     }
     async unpin(filePath: string): Promise<void> {
         await this.removeFromTopPins(filePath);
         await this.removeFromFolderPins(filePath);
         this.refresh();
+        void CollectionPreviewPanel.refresh();
     }
     private async removeFromTopPins(filePath: string): Promise<void> {
         await this.context.workspaceState.update(PINNED_TOP_KEY, this.getPinnedTop().filter((p) => p !== filePath));
@@ -468,6 +627,12 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         set.delete(folderPath);
         await this.context.workspaceState.update(EXPANDED_FOLDERS_KEY, [...set]);
     }
+    // Clear all persisted expansion (used by Collapse All — the built-in collapse
+    // command doesn't fire per-folder collapse events, so we reset state ourselves
+    // and refresh so folder icons return to their closed variant).
+    async clearExpandedFolders(): Promise<void> {
+        await this.context.workspaceState.update(EXPANDED_FOLDERS_KEY, []);
+    }
 
     getExpandAll(): boolean { return this.context.workspaceState.get<boolean>(EXPAND_ALL_KEY, false); }
     async setExpandAll(expand: boolean): Promise<void> {
@@ -487,7 +652,8 @@ class WorkspaceExplorerProvider implements vscode.TreeDataProvider<FileNode>, vs
         const all = this.context.workspaceState.get<Record<string, Swatch>>(TEXT_COLOR_KEY, {});
         if (swatch) all[folderPath] = swatch; else delete all[folderPath];
         await this.context.workspaceState.update(TEXT_COLOR_KEY, all);
-        this.refresh();
+        this.refreshTree();
+        this.refreshDecorations();
     }
 }
 
@@ -517,6 +683,12 @@ class TagItem extends vscode.TreeItem {
         this.description = `${count}`;
         this.iconPath = new vscode.ThemeIcon('tag');
         this.contextValue = 'tag';
+        // Single-click opens the Collection Preview (handler no-ops when feature disabled).
+        this.command = {
+            command: 'workspaceExplorer.openTag',
+            title: 'Open Collection Preview',
+            arguments: [tag],
+        };
     }
 }
 
@@ -540,6 +712,8 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
     private view: vscode.TreeView<TagNode> | undefined;
     filter = '';
 
+    constructor(private readonly context: vscode.ExtensionContext) {}
+
     setView(view: vscode.TreeView<TagNode>): void { this.view = view; this.updateCount(); }
 
     private updateCount(): void {
@@ -562,13 +736,36 @@ class TagsProvider implements vscode.TreeDataProvider<TagNode> {
 
     getTreeItem(e: TagNode): vscode.TreeItem { return e; }
 
+    filesForTag(tag: string): string[] {
+        return (this.tagMap.get(tag) ?? []).map((u) => u.fsPath);
+    }
+
+    getTagSort(): TagSortMode {
+        return this.context.workspaceState.get<TagSortMode>(TAG_SORT_KEY, DEFAULT_TAG_SORT);
+    }
+
+    setTagSort(mode: TagSortMode): void {
+        this.context.workspaceState.update(TAG_SORT_KEY, mode);
+        this._onDidChangeTreeData.fire();
+        // Re-order any open tag collection board to match the new sort.
+        void CollectionPreviewPanel.refresh();
+    }
+
     async getChildren(e?: TagNode): Promise<TagNode[]> {
         if (!e) {
             if (this.tagMap.size === 0) await this.scan();
             const needle = this.filter.trim().toLowerCase();
+            const tagSort = this.getTagSort();
             return [...this.tagMap.entries()]
                 .filter(([tag]) => !needle || tag.toLowerCase().includes(needle))
-                .sort((a, b) => a[0].localeCompare(b[0]))
+                .sort((a, b) => {
+                    switch (tagSort) {
+                        case 'nameDesc':   return b[0].localeCompare(a[0]);
+                        case 'countDesc':  return b[1].length - a[1].length || a[0].localeCompare(b[0]);
+                        case 'countAsc':   return a[1].length - b[1].length || a[0].localeCompare(b[0]);
+                        default:           return a[0].localeCompare(b[0]);
+                    }
+                })
                 .map(([tag, files]) => new TagItem(tag, files.length));
         }
         if (e instanceof TagItem) {
@@ -838,6 +1035,875 @@ class RecentFilesProvider implements vscode.TreeDataProvider<RecentItem> {
 
 // ---------- activate ----------
 
+// ---------------------------------------------------------------------------
+// Collection Preview (MindChuk-style note board)
+// ---------------------------------------------------------------------------
+
+function collectionPreviewEnabled(): boolean {
+    return vscode.workspace.getConfiguration('workspaceExplorer').get<boolean>('collectionPreview.enabled', true);
+}
+
+function collectionTintedBackground(): boolean {
+    return vscode.workspace.getConfiguration('workspaceExplorer').get<boolean>('collectionPreview.tintedBackground', true);
+}
+
+// Wrap inline #tags in rendered markdown HTML with a colored pill span. Operates
+// only on text outside HTML tags and skips <pre>/<code> regions so code and
+// attributes (links, hex colors) are untouched. Tags must contain a letter, so
+// pure-numeric refs like "#123" are ignored.
+function highlightTags(html: string): string {
+    let inCode = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (tok) => {
+        if (tok[0] === '<') {
+            if (/^<(pre|code)[\s>]/i.test(tok)) inCode++;
+            else if (/^<\/(pre|code)>/i.test(tok)) inCode = Math.max(0, inCode - 1);
+            return tok;
+        }
+        if (inCode > 0) return tok;
+        return tok.replace(/(^|[\s(\[])#(?=[\w/-]*[A-Za-z])([\w/-]+)/g,
+            (_m, pre, tag) => `${pre}<span class="tag-pill" data-tag="${escapeHtml(tag)}">#${tag}</span>`);
+    });
+}
+
+// Wrap [[wikilinks]] in rendered markdown HTML as clickable spans. Supports
+// [[Note]] and [[Note|alias]]. Resolved targets (a matching note basename exists
+// in noteIndex) carry data-wikilink and are clickable; unresolved ones render
+// dimmed and inert. Skips <pre>/<code> regions like highlightTags.
+function highlightWikilinks(html: string, noteIndex: Set<string>): string {
+    let inCode = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (tok) => {
+        if (tok[0] === '<') {
+            if (/^<(pre|code)[\s>]/i.test(tok)) inCode++;
+            else if (/^<\/(pre|code)>/i.test(tok)) inCode = Math.max(0, inCode - 1);
+            return tok;
+        }
+        if (inCode > 0) return tok;
+        return tok.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (_m, target, alias) => {
+            const name = String(target).trim();
+            const label = escapeHtml(String(alias ?? target).trim());
+            if (noteIndex.has(name.toLowerCase())) {
+                return `<span class="wikilink" data-wikilink="${escapeHtml(name)}">${label}</span>`;
+            }
+            return `<span class="wikilink wikilink-unresolved">${label}</span>`;
+        });
+    });
+}
+
+function escapeHtml(s: string): string {
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function makeNonce(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let out = '';
+    for (let i = 0; i < 32; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    return out;
+}
+
+// Recursively collect ALL files under a directory, skipping dotfiles/dotdirs and node_modules.
+async function collectMarkdownFiles(dir: string, acc: string[], limit: number): Promise<void> {
+    if (acc.length >= limit) return;
+    let entries: [string, vscode.FileType][];
+    try {
+        entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+    } catch {
+        return;
+    }
+    for (const [name, type] of entries) {
+        if (acc.length >= limit) return;
+        if (name.startsWith('.') || name === 'node_modules') continue;
+        const full = path.join(dir, name);
+        if (type === vscode.FileType.Directory) {
+            await collectMarkdownFiles(full, acc, limit);
+        } else if (type === vscode.FileType.File) {
+            acc.push(full);
+        }
+    }
+}
+
+// Shared markdown-it instance. html:false disallows raw HTML from notes (safer);
+// linkify + typographer for nicer rendering.
+const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
+
+const MARKDOWN_EXTS = new Set(['.md', '.markdown']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif']);
+
+type CardKind = 'markdown' | 'image' | 'file';
+
+// Same task-item regex used at render time AND edit time so indices line up.
+const TASK_LINE_RE = /^(\s*[-*+]\s+\[)( |x|X)(\])/;
+
+interface NoteCard {
+    path: string;
+    title: string;
+    kind: CardKind;
+    html: string;       // rendered markdown HTML (markdown kind only)
+    color: string | undefined;
+    search: string;     // lowercased filename + body text, for live filtering
+}
+
+// Walk ancestors of a file to find the nearest folder with an assigned ICON color (folder color).
+function resolveFolderColor(filePath: string, iconColors: Record<string, Swatch>): string | undefined {
+    let cur = path.dirname(filePath);
+    while (true) {
+        const sw = iconColors[cur];
+        if (sw) return CSS_COLOR_BY_SWATCH[sw];
+        const parent = path.dirname(cur);
+        if (parent === cur) break;
+        cur = parent;
+    }
+    return undefined;
+}
+
+// Create a new .md note in folderPath from the QuickAdd form. Falls back to a
+// date/time-based filename when no title is given. Returns the created file's
+// path, or undefined on failure. Caller is responsible for refresh/open.
+async function createQuickNote(folderPath: string, title: string, text: string): Promise<string | undefined> {
+    // Build a safe base filename. No title -> timestamp like "2026-05-30 14-07-09".
+    let base = title.trim();
+    if (!base) {
+        const d = new Date();
+        const p = (n: number) => String(n).padStart(2, '0');
+        base = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+    }
+    // Strip path separators / illegal filename chars; collapse whitespace.
+    base = base.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim() || 'Untitled';
+
+    let target = vscode.Uri.joinPath(vscode.Uri.file(folderPath), `${base}.md`);
+    if (await pathExists(target)) {
+        for (let i = 2; i < 1000; i++) {
+            const candidate = vscode.Uri.joinPath(vscode.Uri.file(folderPath), `${base} ${i}.md`);
+            if (!(await pathExists(candidate))) { target = candidate; break; }
+        }
+    }
+    try {
+        await vscode.workspace.fs.writeFile(target, Buffer.from(text, 'utf8'));
+        return target.fsPath;
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`Add note failed: ${e?.message ?? e}`);
+        return undefined;
+    }
+}
+
+// Render a filename as a shrinking stem + a pinned extension span. CSS truncates
+// the stem (with an ellipsis) at the card's actual pixel width, while the
+// extension is never clipped — so "Really long note name.md" shows as
+// "Really long not….md" regardless of column width.
+function titleHtml(name: string): string {
+    const ext = path.extname(name);
+    const stem = ext ? name.slice(0, name.length - ext.length) : name;
+    return `<span class="title-stem">${escapeHtml(stem)}</span>`
+        + (ext ? `<span class="title-ext">${escapeHtml(ext)}</span>` : '');
+}
+
+// Strip leading YAML frontmatter from a markdown body.
+function stripFrontmatter(body: string): string {
+    return body.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+}
+
+// Post-process markdown-it output so task-list items become interactive checkboxes.
+// Plain markdown-it renders `- [ ]`/`- [x]` as a literal "[ ] text" inside an <li>;
+// it does NOT emit <input> elements. We detect those <li> items (in document order,
+// which matches source order) and replace the leading "[ ]"/"[x]" marker with an
+// ENABLED checkbox carrying a 0-based data-task-index matching the Nth task line in
+// the source (counted with the same TASK_LINE_RE used when editing the file).
+function makeTaskCheckboxesInteractive(html: string): string {
+    let idx = 0;
+    return html.replace(/<li>(\s*)\[([ xX])\]\s?/g, (_m, lead, mark) => {
+        const checked = mark === 'x' || mark === 'X';
+        const out = `<li class="task-list-item">${lead}<input type="checkbox" class="task-checkbox" data-task-index="${idx}"${checked ? ' checked' : ''}> `;
+        idx++;
+        return out;
+    });
+}
+
+// Set of all workspace note basenames (no extension, lowercased) for resolving
+// [[wikilinks]]. Built once per board render.
+async function wikilinkIndex(): Promise<Set<string>> {
+    const files = await vscode.workspace.findFiles('**/*.{md,markdown}', '**/node_modules/**');
+    return new Set(files.map((u) => path.basename(u.fsPath, path.extname(u.fsPath)).toLowerCase()));
+}
+
+async function buildNoteCard(filePath: string, iconColors: Record<string, Swatch>, noteIndex: Set<string> = new Set()): Promise<NoteCard> {
+    const ext = path.extname(filePath).toLowerCase();
+    const color = resolveFolderColor(filePath, iconColors);
+    const filename = path.basename(filePath);
+
+    if (IMAGE_EXTS.has(ext)) {
+        return { path: filePath, title: filename, kind: 'image', html: '', color, search: filename.toLowerCase() };
+    }
+    if (!MARKDOWN_EXTS.has(ext)) {
+        return { path: filePath, title: filename, kind: 'file', html: '', color, search: filename.toLowerCase() };
+    }
+
+    // Markdown: read, strip frontmatter, render to HTML, derive title.
+    let body = '';
+    try {
+        const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
+        body = Buffer.from(bytes).toString('utf8');
+    } catch {
+        body = '';
+    }
+    body = stripFrontmatter(body);
+    const rendered = highlightWikilinks(highlightTags(makeTaskCheckboxesInteractive(md.render(body))), noteIndex);
+    // Search corpus: filename + raw body text (title + content), lowercased.
+    const search = `${filename}\n${body}`.toLowerCase();
+    return { path: filePath, title: filename, kind: 'markdown', html: rendered, color, search };
+}
+
+// Flip the Nth (0-based) task-list checkbox in a markdown file's source to `checked`.
+// Counts task lines in source order using the SAME regex as the renderer.
+async function toggleTaskInFile(filePath: string, index: number, checked: boolean): Promise<void> {
+    let body: string;
+    try {
+        const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
+        body = Buffer.from(bytes).toString('utf8');
+    } catch {
+        return;
+    }
+    const lines = body.split('\n');
+    let count = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(TASK_LINE_RE);
+        if (!m) continue;
+        if (count === index) {
+            lines[i] = lines[i].replace(TASK_LINE_RE, `$1${checked ? 'x' : ' '}$3`);
+            await vscode.workspace.fs.writeFile(vscode.Uri.file(filePath), Buffer.from(lines.join('\n'), 'utf8'));
+            return;
+        }
+        count++;
+    }
+}
+
+// Small filled pin badge shown in the corner of pinned cards.
+const PIN_BADGE_SVG = `<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M9.2 1.2a1 1 0 0 1 1.4 0l4.2 4.2a1 1 0 0 1 0 1.4l-.5.5a2 2 0 0 1-2.4.3l-1.2 2.9-1.8 1.8a.8.8 0 0 1-1.1 0L5.3 10.3l-3.4 3.4a.6.6 0 0 1-.9-.9l3.4-3.4-2.1-2.1a.8.8 0 0 1 0-1.1l1.8-1.8 2.9-1.2a2 2 0 0 1 .3-2.4z"/></svg>`;
+
+// Inline SVG glyphs used for non-markdown, non-image cards.
+function fileGlyphSvg(ext: string): string {
+    if (ext === '.pdf') {
+        return `<svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/>
+            <text x="12" y="18" font-size="6" text-anchor="middle" fill="currentColor" stroke="none">PDF</text></svg>`;
+    }
+    return `<svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/></svg>`;
+}
+
+class CollectionPreviewPanel {
+    private static panel: vscode.WebviewPanel | undefined;
+    // How to re-gather + re-render the currently shown collection. Set by the
+    // open commands; cleared when the panel is disposed.
+    private static reload: (() => Promise<void>) | undefined;
+
+    private static getLayout(context: vscode.ExtensionContext): 'expanded' | 'compressed' {
+        return context.workspaceState.get<'expanded' | 'compressed'>(COLLECTION_LAYOUT_KEY, 'expanded');
+    }
+
+    // Remember how to rebuild the current collection so a filesystem change
+    // (rename/delete/move/new from a context menu, drag-drop, or external tool)
+    // can refresh the board in place.
+    static setSource(reload: () => Promise<void>): void {
+        this.reload = reload;
+    }
+
+    // Re-render the open panel from its source. No-op if no panel is open, so a
+    // file change never pops the board back up after the user closed it.
+    static async refresh(): Promise<void> {
+        if (this.panel && this.reload) await this.reload();
+    }
+
+    // The folder this board represents, or undefined for a tag collection.
+    // QuickAdd (the "Add note" form) is only available for folder collections.
+    private static folderPath: string | undefined;
+
+    // Dedicated panels keyed by heading (e.g. "Tag: #foo"), so clicking the same
+    // tag pill reveals the existing panel instead of opening a duplicate. The
+    // stored reload() re-gathers + re-renders that panel's collection on reveal.
+    private static separatePanels = new Map<string, { panel: vscode.WebviewPanel; reload: () => Promise<void> }>();
+
+    static async show(context: vscode.ExtensionContext, heading: string, files: string[], pinned?: Set<string>, folderPath?: string): Promise<void> {
+        const iconColors = context.workspaceState.get<Record<string, Swatch>>(ICON_COLOR_KEY, {});
+        const pinnedSet = pinned ?? new Set<string>();
+        this.folderPath = folderPath;
+        const MAX = 500;
+        const total = files.length;
+        const capped = files.slice(0, MAX);
+        // Index of all workspace note basenames (lowercased) so [[wikilinks]] can
+        // be marked resolved/unresolved at render time.
+        const noteIndex = await wikilinkIndex();
+        const cards = await Promise.all(capped.map((f) => buildNoteCard(f, iconColors, noteIndex)));
+
+        // localResourceRoots must include workspace folders so images load via asWebviewUri.
+        const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri);
+
+        if (!this.panel) {
+            this.panel = vscode.window.createWebviewPanel(
+                'workspaceExplorerCollectionPreview',
+                heading,
+                vscode.ViewColumn.Active,
+                {
+                    enableScripts: true,
+                    retainContextWhenHidden: true,
+                    localResourceRoots: roots,
+                },
+            );
+            this.panel.onDidDispose(() => { this.panel = undefined; this.reload = undefined; });
+            this.panel.webview.onDidReceiveMessage(async (msg) => {
+                if (!msg || typeof msg.type !== 'string') return;
+                if (msg.type === 'open' && typeof msg.path === 'string') {
+                    vscode.commands.executeCommand('vscode.open', vscode.Uri.file(msg.path));
+                } else if (msg.type === 'setLayout' && (msg.layout === 'expanded' || msg.layout === 'compressed')) {
+                    await context.workspaceState.update(COLLECTION_LAYOUT_KEY, msg.layout);
+                } else if (msg.type === 'toggleTask'
+                    && typeof msg.path === 'string'
+                    && typeof msg.index === 'number'
+                    && typeof msg.checked === 'boolean') {
+                    await toggleTaskInFile(msg.path, msg.index, msg.checked);
+                } else if (msg.type === 'openWikilink' && typeof msg.target === 'string') {
+                    const want = msg.target.trim().toLowerCase();
+                    const matches = await vscode.workspace.findFiles('**/*.{md,markdown}', '**/node_modules/**');
+                    const hit = matches.find((u) => path.basename(u.fsPath, path.extname(u.fsPath)).toLowerCase() === want);
+                    if (hit) vscode.commands.executeCommand('vscode.open', hit);
+                    else vscode.window.showInformationMessage(`No note named "${msg.target}" found.`);
+                } else if (msg.type === 'openTagPreview' && typeof msg.tag === 'string') {
+                    // Clicking a #tag pill opens that tag's preview in its OWN panel.
+                    vscode.commands.executeCommand('workspaceExplorer.openTagSeparate', msg.tag);
+                } else if (msg.type === 'addNote'
+                    && typeof msg.title === 'string'
+                    && typeof msg.text === 'string') {
+                    // QuickAdd: only valid for folder collections, and only when
+                    // body text is present (empty text behaves like Cancel).
+                    if (this.folderPath && msg.text.trim()) {
+                        const created = await createQuickNote(this.folderPath, msg.title, msg.text);
+                        if (created) {
+                            await this.refresh();
+                            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(created));
+                        }
+                    }
+                }
+            });
+        }
+        this.panel.title = heading;
+        this.panel.webview.html = this.render(this.panel.webview, heading, cards, total, MAX, this.getLayout(context), pinnedSet, !!folderPath);
+        this.panel.reveal(this.panel.viewColumn ?? vscode.ViewColumn.Active);
+    }
+
+    // Open a collection in its OWN dedicated panel (not the reused singleton board).
+    // Used when clicking a #tag pill so the board it was clicked from stays put.
+    static async showSeparate(context: vscode.ExtensionContext, heading: string, files: string[], pinned?: Set<string>): Promise<void> {
+        const iconColors = context.workspaceState.get<Record<string, Swatch>>(ICON_COLOR_KEY, {});
+        const pinnedSet = pinned ?? new Set<string>();
+        const MAX = 500;
+        const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri);
+
+        // Reuse an existing separate panel for the same collection (by heading)
+        // instead of spawning duplicates — reveal it and re-render fresh content.
+        const existing = this.separatePanels.get(heading);
+        if (existing) {
+            existing.panel.reveal(existing.panel.viewColumn ?? vscode.ViewColumn.Active);
+            await existing.reload();
+            return;
+        }
+
+        const panel = vscode.window.createWebviewPanel(
+            'workspaceExplorerCollectionPreview',
+            heading,
+            vscode.ViewColumn.Active,
+            { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: roots },
+        );
+
+        const renderInto = async () => {
+            const total = files.length;
+            const capped = files.slice(0, MAX);
+            const noteIndex = await wikilinkIndex();
+            const cards = await Promise.all(capped.map((f) => buildNoteCard(f, iconColors, noteIndex)));
+            panel.title = heading;
+            panel.webview.html = this.render(panel.webview, heading, cards, total, MAX, this.getLayout(context), pinnedSet, false);
+        };
+
+        this.separatePanels.set(heading, { panel, reload: renderInto });
+        panel.onDidDispose(() => { this.separatePanels.delete(heading); });
+
+        panel.webview.onDidReceiveMessage(async (msg) => {
+            if (!msg || typeof msg.type !== 'string') return;
+            if (msg.type === 'open' && typeof msg.path === 'string') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(msg.path));
+            } else if (msg.type === 'setLayout' && (msg.layout === 'expanded' || msg.layout === 'compressed')) {
+                await context.workspaceState.update(COLLECTION_LAYOUT_KEY, msg.layout);
+            } else if (msg.type === 'toggleTask'
+                && typeof msg.path === 'string'
+                && typeof msg.index === 'number'
+                && typeof msg.checked === 'boolean') {
+                await toggleTaskInFile(msg.path, msg.index, msg.checked);
+            } else if (msg.type === 'openWikilink' && typeof msg.target === 'string') {
+                const want = msg.target.trim().toLowerCase();
+                const matches = await vscode.workspace.findFiles('**/*.{md,markdown}', '**/node_modules/**');
+                const hit = matches.find((u) => path.basename(u.fsPath, path.extname(u.fsPath)).toLowerCase() === want);
+                if (hit) vscode.commands.executeCommand('vscode.open', hit);
+                else vscode.window.showInformationMessage(`No note named "${msg.target}" found.`);
+            } else if (msg.type === 'openTagPreview' && typeof msg.tag === 'string') {
+                // A tag pill inside a separate panel opens yet another separate panel.
+                vscode.commands.executeCommand('workspaceExplorer.openTagSeparate', msg.tag);
+            }
+        });
+
+        await renderInto();
+        panel.reveal(vscode.ViewColumn.Active);
+    }
+
+    private static render(
+        webview: vscode.Webview,
+        heading: string,
+        cards: NoteCard[],
+        total: number,
+        max: number,
+        layout: 'expanded' | 'compressed',
+        pinnedSet: Set<string>,
+        canAddNote: boolean,
+    ): string {
+        const nonce = makeNonce();
+        const truncated = total > max
+            ? `<div class="note">Showing ${max} of ${total} items</div>`
+            : '';
+        const cardHtml = cards.map((c) => {
+            const accent = c.color ?? 'var(--vscode-panel-border)';
+            const ctx = JSON.stringify({
+                webviewSection: 'previewCard',
+                filePath: c.path,
+                preventDefaultContextMenuItems: true,
+            }).replace(/"/g, '&quot;');
+            let inner: string;
+            if (c.kind === 'image') {
+                const src = webview.asWebviewUri(vscode.Uri.file(c.path)).toString();
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${titleHtml(c.title)}</div>
+                    <div class="card-body img-body"><img class="card-img" src="${src}" alt="${escapeHtml(c.title)}"></div>`;
+            } else if (c.kind === 'file') {
+                const ext = path.extname(c.path).toLowerCase();
+                // Title above shows the filename; the body is just the glyph.
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${titleHtml(c.title)}</div>
+                    <div class="card-body file-body">
+                        <div class="file-glyph">${fileGlyphSvg(ext)}</div>
+                    </div>`;
+            } else {
+                // markdown
+                inner = `<div class="card-title" title="${escapeHtml(c.title)}">${titleHtml(c.title)}</div>
+                    <div class="card-body md-body">${c.html}</div>`;
+            }
+            // file-kind cards never expand: always rendered at compressed size.
+            const isPinned = pinnedSet.has(c.path);
+            const kindClass = `card card-${c.kind}${isPinned ? ' card-pinned' : ''}`;
+            const badge = isPinned ? `<div class="pin-badge" title="Pinned">${PIN_BADGE_SVG}</div>` : '';
+            return `<div class="${kindClass}" data-path="${escapeHtml(c.path)}" data-search="${escapeHtml(c.search)}" data-vscode-context="${ctx}" style="--card-accent: ${accent}; border-left-color: ${accent};">
+                ${badge}${inner}
+            </div>`;
+        }).join('\n');
+        const empty = cards.length === 0 ? `<div class="note">No items in this collection.</div>` : '';
+        const tintClass = collectionTintedBackground() ? ' tinted' : '';
+        const containerClass = (layout === 'compressed' ? 'grid compressed' : 'grid') + tintClass;
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; font-src ${webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+    body {
+        margin: 0;
+        padding: 16px;
+        background: var(--vscode-editor-background);
+        color: var(--vscode-foreground);
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-font-size);
+    }
+    h1 { font-size: 1.2em; margin: 0 0 10px 0; font-weight: 600; }
+    /* Toolbar: search pinned left, action buttons pinned right. */
+    .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .layout-toggle {
+        background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+        color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+        font-size: 0.85em;
+    }
+    .layout-toggle:hover { opacity: 0.85; }
+    .search-input {
+        background: var(--vscode-input-background);
+        color: var(--vscode-input-foreground);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 0.85em;
+        flex: 1 1 auto;
+        max-width: 360px;
+    }
+    .search-input::placeholder { color: var(--vscode-input-placeholderForeground); }
+    /* [hidden] must beat .grid.compressed .card and .quickadd's display rules. */
+    .card[hidden], .quickadd[hidden], .note[hidden] { display: none !important; }
+    .header-btn {
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+        font-size: 0.85em;
+    }
+    .header-btn:hover { opacity: 0.9; }
+    .qa-cancel {
+        background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+        color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+    }
+    .quickadd {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 14px;
+        padding: 12px;
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 8px;
+        background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+    }
+    .qa-title, .qa-text {
+        width: 100%;
+        box-sizing: border-box;
+        background: var(--vscode-input-background);
+        color: var(--vscode-input-foreground);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-family: var(--vscode-font-family);
+        font-size: 0.9em;
+    }
+    .qa-text { resize: vertical; min-height: 80px; font-family: var(--vscode-editor-font-family, monospace); }
+    .qa-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .note { opacity: 0.7; margin-bottom: 12px; font-size: 0.9em; }
+    /* True masonry via CSS multi-column flow: cards pack top-to-bottom within
+       each column with no row-height gaps (a CSS grid aligns rows, leaving the
+       gaps the user saw). column-width drives the responsive column count. */
+    .grid {
+        column-width: 240px;
+        column-gap: 14px;
+    }
+    .card {
+        position: relative;
+        break-inside: avoid;
+        -webkit-column-break-inside: avoid;
+        margin: 0 0 14px 0;
+        /* Base card surface. When the grid has .tinted, a dim wash of the folder
+           color (--card-accent) is mixed in (see .grid.tinted .card below). The
+           colored left border is always shown regardless. */
+        --card-base: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+        --card-accent: var(--vscode-panel-border);
+        background: var(--card-base);
+        border: 1px solid var(--vscode-panel-border);
+        border-left-width: 4px;
+        border-left-color: var(--vscode-panel-border);
+        border-radius: 10px;
+        padding: 12px 14px;
+        cursor: pointer;
+        overflow: hidden;
+        transition: transform 0.08s ease, box-shadow 0.08s ease;
+    }
+    /* Tinted background (setting): dim folder-color wash over the card surface. */
+    .grid.tinted .card { background: color-mix(in srgb, var(--card-accent) 12%, var(--card-base)); }
+    /* #tag pill, colored by the card's folder color. */
+    .tag-pill {
+        display: inline-block;
+        padding: 0 7px;
+        border-radius: 10px;
+        font-size: 0.85em;
+        font-weight: 600;
+        line-height: 1.5;
+        background: color-mix(in srgb, var(--card-accent) 28%, transparent);
+        color: var(--vscode-foreground);
+        white-space: nowrap;
+        cursor: pointer;
+    }
+    .tag-pill:hover { background: color-mix(in srgb, var(--card-accent) 40%, transparent); }
+    /* [[wikilink]] — clickable internal note link. */
+    .wikilink {
+        color: var(--vscode-textLink-foreground);
+        cursor: pointer;
+        text-decoration: none;
+        border-bottom: 1px dotted var(--vscode-textLink-foreground);
+    }
+    .wikilink:hover { text-decoration: underline; }
+    .wikilink-unresolved {
+        color: var(--vscode-disabledForeground);
+        cursor: default;
+        border-bottom: 1px dashed var(--vscode-disabledForeground);
+        opacity: 0.8;
+    }
+    .card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    }
+    .card-title {
+        /* Small uppercase label so the filename reads as a header, not body text. */
+        font-size: 0.7em;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--vscode-descriptionForeground);
+        margin-bottom: 8px;
+        /* Don't let the flex column crush it (fixes title vanishing in compress). */
+        flex: 0 0 auto;
+        /* Lay out stem + extension on one line; stem shrinks, extension is pinned. */
+        display: flex;
+        align-items: baseline;
+        max-width: 100%;
+    }
+    /* Stem truncates at the card's real width; extension always stays visible. */
+    .title-stem {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .title-ext {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+    .card-body { position: relative; }
+
+    /* ---- Pinned cards: accent ring + corner badge ---- */
+    .card-pinned {
+        border-color: var(--vscode-focusBorder);
+        box-shadow: 0 0 0 1px var(--vscode-focusBorder) inset;
+    }
+    .pin-badge {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        color: var(--vscode-button-foreground);
+        background: var(--vscode-focusBorder);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        transform: rotate(45deg);
+    }
+    /* Keep the title clear of the badge. */
+    .card-pinned .card-title { padding-right: 22px; }
+
+    /* ---- Markdown body: shrunken rendered-preview look ---- */
+    .md-body { font-size: 0.8em; line-height: 1.45; opacity: 0.92; word-break: break-word; }
+    .md-body h1 { font-size: 1.25em; margin: 0.4em 0 0.3em; }
+    .md-body h2 { font-size: 1.15em; margin: 0.4em 0 0.3em; }
+    .md-body h3, .md-body h4, .md-body h5, .md-body h6 { font-size: 1.05em; margin: 0.35em 0 0.25em; }
+    .md-body p { margin: 0.4em 0; }
+    .md-body ul, .md-body ol { margin: 0.3em 0; padding-left: 1.3em; }
+    .md-body pre {
+        background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.15));
+        padding: 6px 8px; border-radius: 6px; overflow-x: auto; font-size: 0.95em;
+    }
+    .md-body code { font-family: var(--vscode-editor-font-family, monospace); }
+    .md-body blockquote {
+        margin: 0.4em 0; padding-left: 8px; opacity: 0.85;
+        border-left: 3px solid var(--vscode-panel-border);
+    }
+    .md-body img { max-width: 100%; max-height: 160px; object-fit: contain; }
+    .md-body a { color: var(--vscode-textLink-foreground); }
+    .md-body ul.contains-task-list, .md-body li.task-list-item { list-style: none; }
+    .md-body li.task-list-item { margin-left: -1.1em; }
+    .task-checkbox { cursor: pointer; vertical-align: middle; margin-right: 4px; }
+
+    /* ---- Image cards ---- */
+    /* Expanded mode: fixed-height band showing a centered horizontal slice. */
+    .img-body { height: 180px; width: 100%; overflow: hidden; border-radius: 6px; }
+    .card-img { width: 100%; height: 100%; object-fit: cover; object-position: center; display: block; }
+
+    /* ---- Generic file cards (pdf/other): always compressed, never expand. ---- */
+    .card-file .file-body {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 8px; height: 128px; opacity: 0.85;
+    }
+    .file-glyph { color: var(--vscode-foreground); opacity: 0.7; }
+
+    /* ---- Compressed mode: EVERY card is the exact same total size. ----
+       Fix the height on the .card itself (not just the body) and lay it out as a
+       flex column: the title takes its natural height and the body fills the rest.
+       This keeps all cards identical regardless of content — including image and
+       file cards, whose media fills the remaining space and crops to fill. */
+    .grid.compressed .card {
+        height: 200px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    }
+    .grid.compressed .card .card-body {
+        flex: 1 1 auto;
+        min-height: 0;          /* allow the flex child to shrink so overflow works */
+        max-height: none;
+        overflow-y: auto;
+        overflow-x: hidden;
+        position: relative;
+    }
+    /* Media fills the leftover space (MindChuk-style filled thumbnails). */
+    .grid.compressed .card-image .img-body,
+    .grid.compressed .card-file .file-body { height: 100%; }
+    .grid.compressed .card-markdown .card-body::after {
+        content: "";
+        position: absolute; left: 0; right: 0; bottom: 0; height: 36px;
+        background: linear-gradient(to bottom, transparent, var(--card-base));
+        pointer-events: none;
+    }
+    /* Fade blends into the tinted surface when the tint setting is on. */
+    .grid.tinted.compressed .card-markdown .card-body::after {
+        background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--card-accent) 12%, var(--card-base)));
+    }
+</style>
+</head>
+<body>
+    <h1>${escapeHtml(heading)}</h1>
+    <div class="toolbar">
+        <input type="search" id="search" class="search-input" placeholder="Search title & content…" />
+        <div class="toolbar-right">
+            <button class="layout-toggle" id="layoutToggle"></button>
+            ${canAddNote ? `<button class="header-btn" id="addNoteBtn">+ Add note</button>` : ''}
+        </div>
+    </div>
+    ${canAddNote ? `
+    <div class="quickadd" id="quickadd" hidden>
+        <input type="text" id="qaTitle" class="qa-title" placeholder="Title (optional — defaults to date/time)" />
+        <textarea id="qaText" class="qa-text" rows="5" placeholder="Note text…"></textarea>
+        <div class="qa-actions">
+            <button class="header-btn qa-save" id="qaSave">Save</button>
+            <button class="header-btn qa-cancel" id="qaCancel">Cancel</button>
+        </div>
+    </div>` : ''}
+    ${truncated}
+    ${empty}
+    <div class="note" id="noResults" hidden>No notes match your search.</div>
+    <div class="${containerClass}" id="grid">
+        ${cardHtml}
+    </div>
+    <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi();
+        const grid = document.getElementById('grid');
+        const toggleBtn = document.getElementById('layoutToggle');
+
+        // Restore layout from webview state if present, else fall back to server-provided value.
+        const prev = vscode.getState();
+        let layout = (prev && prev.layout) ? prev.layout : '${layout}';
+        function applyLayout() {
+            if (layout === 'compressed') grid.classList.add('compressed');
+            else grid.classList.remove('compressed');
+            toggleBtn.textContent = layout === 'compressed' ? 'Expand ⇕' : 'Compress ⇕';
+            vscode.setState({ layout });
+        }
+        applyLayout();
+
+        toggleBtn.addEventListener('click', () => {
+            layout = layout === 'compressed' ? 'expanded' : 'compressed';
+            applyLayout();
+            vscode.postMessage({ type: 'setLayout', layout });
+        });
+
+        // QuickAdd (folder collections only).
+        const addNoteBtn = document.getElementById('addNoteBtn');
+        const quickadd = document.getElementById('quickadd');
+        if (addNoteBtn && quickadd) {
+            const qaTitle = document.getElementById('qaTitle');
+            const qaText = document.getElementById('qaText');
+            const closeForm = () => {
+                quickadd.hidden = true;
+                qaTitle.value = '';
+                qaText.value = '';
+            };
+            const save = () => {
+                // Empty body acts like Cancel (per spec).
+                if (!qaText.value.trim()) { closeForm(); return; }
+                vscode.postMessage({ type: 'addNote', title: qaTitle.value, text: qaText.value });
+                closeForm();
+            };
+            addNoteBtn.addEventListener('click', () => {
+                quickadd.hidden = !quickadd.hidden;
+                if (!quickadd.hidden) qaTitle.focus();
+            });
+            document.getElementById('qaSave').addEventListener('click', save);
+            document.getElementById('qaCancel').addEventListener('click', closeForm);
+            // Cmd/Ctrl+Enter saves; Esc cancels.
+            quickadd.addEventListener('keydown', (e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); save(); }
+                else if (e.key === 'Escape') { e.preventDefault(); closeForm(); }
+            });
+        }
+
+        document.querySelectorAll('.card').forEach((el) => {
+            el.addEventListener('click', (e) => {
+                // Don't open when interacting with a checkbox.
+                if (e.target && e.target.classList && e.target.classList.contains('task-checkbox')) return;
+                vscode.postMessage({ type: 'open', path: el.getAttribute('data-path') });
+            });
+        });
+
+        // Live search: filter cards by title + content as the user types.
+        const searchInput = document.getElementById('search');
+        const noResults = document.getElementById('noResults');
+        if (searchInput) {
+            const cardsList = Array.from(document.querySelectorAll('.card'));
+            const applyFilter = () => {
+                const q = searchInput.value.trim().toLowerCase();
+                let visible = 0;
+                for (const el of cardsList) {
+                    const hay = el.getAttribute('data-search') || '';
+                    const match = !q || hay.indexOf(q) !== -1;
+                    el.hidden = !match;
+                    if (match) visible++;
+                }
+                if (noResults) noResults.hidden = visible !== 0;
+            };
+            searchInput.addEventListener('input', applyFilter);
+        }
+
+        // Wikilink clicks: open the target note (don't bubble to the card opener).
+        document.querySelectorAll('.wikilink[data-wikilink]').forEach((el) => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                vscode.postMessage({ type: 'openWikilink', target: el.getAttribute('data-wikilink') });
+            });
+        });
+
+        // Clicking a #tag pill opens that tag's collection preview (not the card).
+        document.querySelectorAll('.tag-pill[data-tag]').forEach((el) => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                vscode.postMessage({ type: 'openTagPreview', tag: el.getAttribute('data-tag') });
+            });
+        });
+
+        document.querySelectorAll('.task-checkbox').forEach((cb) => {
+            cb.addEventListener('click', (e) => { e.stopPropagation(); });
+            cb.addEventListener('change', (e) => {
+                e.stopPropagation();
+                const card = cb.closest('.card');
+                vscode.postMessage({
+                    type: 'toggleTask',
+                    path: card.getAttribute('data-path'),
+                    index: parseInt(cb.getAttribute('data-task-index'), 10),
+                    checked: cb.checked,
+                });
+            });
+        });
+    </script>
+</body>
+</html>`;
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const provider = new WorkspaceExplorerProvider(context);
     const view = vscode.window.createTreeView('workspaceExplorer.tree', {
@@ -866,7 +1932,7 @@ export function activate(context: vscode.ExtensionContext) {
         provider.refreshNode(e.element);
     }));
 
-    const tagsProvider = new TagsProvider();
+    const tagsProvider = new TagsProvider(context);
     const orphansProvider = new OrphansProvider(provider);
     const recentProvider = new RecentFilesProvider(provider);
     const tagsView = vscode.window.createTreeView('workspaceExplorer.tags', { treeDataProvider: tagsProvider });
@@ -883,6 +1949,51 @@ export function activate(context: vscode.ExtensionContext) {
         tagsView,
         orphansView,
         recentView,
+        vscode.commands.registerCommand('workspaceExplorer.openFolder', async (uri?: vscode.Uri) => {
+            // No-op when the feature is disabled, preserving plain expand/collapse behavior.
+            if (!collectionPreviewEnabled() || !uri) return;
+            const run = async () => {
+                const files: string[] = [];
+                await collectMarkdownFiles(uri.fsPath, files, 500);
+                // Order preview cards using the folder's own sort mode (Feature 1),
+                // then float pinned files to the top like the explorer tree does.
+                const sorted = await sortFilePaths(files, provider.getSortMode(uri.fsPath));
+                const pinned = new Set([...provider.getPinnedTop(), ...provider.getPinnedInFolder(uri.fsPath)]);
+                await CollectionPreviewPanel.show(context, `Collection: ${path.basename(uri.fsPath)}`, applyPinOrder(sorted, pinned), pinned, uri.fsPath);
+            };
+            CollectionPreviewPanel.setSource(run);
+            await run();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.openTag', async (tag?: string) => {
+            if (!collectionPreviewEnabled() || !tag) return;
+            const run = async () => {
+                const files = tagsProvider.filesForTag(tag);
+                // Order tag preview cards by basename. TagSortMode's count modes have
+                // no per-file meaning here, so they fall back to ascending name; name
+                // modes honor the chosen direction.
+                const tagSort = tagsProvider.getTagSort();
+                const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
+                const sorted = await sortFilePaths(files, dir);
+                const pinned = new Set(provider.getAllPinnedPaths());
+                await CollectionPreviewPanel.show(context, `Tag: #${tag}`, applyPinOrder(sorted, pinned), pinned);
+            };
+            CollectionPreviewPanel.setSource(run);
+            await run();
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.openTagSeparate', async (tag?: string) => {
+            // Open a tag collection in its own dedicated panel (used by tag-pill clicks).
+            if (!collectionPreviewEnabled() || !tag) return;
+            const files = tagsProvider.filesForTag(tag);
+            const tagSort = tagsProvider.getTagSort();
+            const dir: SortMode = tagSort === 'nameDesc' ? 'nameDesc' : 'nameAsc';
+            const sorted = await sortFilePaths(files, dir);
+            const pinned = new Set(provider.getAllPinnedPaths());
+            await CollectionPreviewPanel.showSeparate(context, `Tag: #${tag}`, applyPinOrder(sorted, pinned), pinned);
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameAsc', () => tagsProvider.setTagSort('nameAsc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortNameDesc', () => tagsProvider.setTagSort('nameDesc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortCountDesc', () => tagsProvider.setTagSort('countDesc')),
+        vscode.commands.registerCommand('workspaceExplorer.tags.sortCountAsc', () => tagsProvider.setTagSort('countAsc')),
         vscode.commands.registerCommand('workspaceExplorer.tags.refresh', () => tagsProvider.refresh()),
         vscode.commands.registerCommand('workspaceExplorer.tags.filter', () => {
             const input = vscode.window.createInputBox();
@@ -956,11 +2067,25 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(onceOnState);
     }
 
+    // Debounced refreshers so rapid file changes (typing + autosave) don't cause flashing/churn.
+    const debounce = (fn: () => void, ms: number) => {
+        let t: ReturnType<typeof setTimeout> | undefined;
+        return () => {
+            if (t) clearTimeout(t);
+            t = setTimeout(fn, ms);
+        };
+    };
+
     // Refresh tags/orphans when workspace files change.
     const aux = vscode.workspace.createFileSystemWatcher('**/*');
-    aux.onDidCreate(() => { tagsProvider.refresh(); orphansProvider.refresh(); recentProvider.refresh(); });
-    aux.onDidChange(() => { tagsProvider.refresh(); orphansProvider.refresh(); recentProvider.refresh(); });
-    aux.onDidDelete(() => { tagsProvider.refresh(); orphansProvider.refresh(); recentProvider.refresh(); });
+    const debouncedAuxRefresh = debounce(() => {
+        tagsProvider.refresh();
+        orphansProvider.refresh();
+        recentProvider.refresh();
+    }, 800);
+    aux.onDidCreate(() => debouncedAuxRefresh());
+    aux.onDidChange(() => debouncedAuxRefresh());
+    aux.onDidDelete(() => debouncedAuxRefresh());
     context.subscriptions.push(aux);
     context.subscriptions.push(vscode.window.registerFileDecorationProvider(provider));
 
@@ -1005,19 +2130,32 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('workspaceExplorer.sortNameDesc', setSort('nameDesc')),
         vscode.commands.registerCommand('workspaceExplorer.sortEditedAsc', setSort('editedAsc')),
         vscode.commands.registerCommand('workspaceExplorer.sortEditedDesc', setSort('editedDesc')),
+        vscode.commands.registerCommand('workspaceExplorer.moveFolderUp', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
+            if (requireNode(node) && node.isDirectory) return provider.moveFolderInSiblings(node.uri.fsPath, 'up');
+        }),
+        vscode.commands.registerCommand('workspaceExplorer.moveFolderDown', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
+            if (requireNode(node) && node.isDirectory) return provider.moveFolderInSiblings(node.uri.fsPath, 'down');
+        }),
         vscode.commands.registerCommand('workspaceExplorer.pinToFolder', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node) && !node.isDirectory) return provider.pinInFolder(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.pinToTop', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node) && !node.isDirectory) return provider.pinToTop(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.unpin', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node) && !node.isDirectory) return provider.unpin(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.hide', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) return provider.hide(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.unhide', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) return provider.unhide(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.toggleHiddenShow', async () => {
@@ -1047,7 +2185,10 @@ export function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('workspaceExplorer.collapseAll', async () => {
             await provider.setExpandAll(false);
+            await provider.clearExpandedFolders();
             await vscode.commands.executeCommand('workbench.actions.treeView.workspaceExplorer.tree.collapseAll');
+            // Re-render so folder icons drop their open variant.
+            provider.refresh();
         }),
     );
 
@@ -1060,21 +2201,26 @@ export function activate(context: vscode.ExtensionContext) {
     // Resource actions — delegate to built-ins with our URI.
     context.subscriptions.push(
         vscode.commands.registerCommand('workspaceExplorer.revealInOS', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) return vscode.commands.executeCommand('revealFileInOS', node.uri);
         }),
         vscode.commands.registerCommand('workspaceExplorer.openInTerminal', (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) return vscode.commands.executeCommand('openInIntegratedTerminal', node.uri);
         }),
         vscode.commands.registerCommand('workspaceExplorer.copyPath', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) await vscode.env.clipboard.writeText(node.uri.fsPath);
         }),
         vscode.commands.registerCommand('workspaceExplorer.copyRelativePath', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node)) {
                 const rel = vscode.workspace.asRelativePath(node.uri, false);
                 await vscode.env.clipboard.writeText(rel);
             }
         }),
         vscode.commands.registerCommand('workspaceExplorer.openToSide', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (requireNode(node) && !node.isDirectory) {
                 await vscode.commands.executeCommand('vscode.open', node.uri, { viewColumn: vscode.ViewColumn.Beside });
             }
@@ -1084,6 +2230,7 @@ export function activate(context: vscode.ExtensionContext) {
     // File ops.
     context.subscriptions.push(
         vscode.commands.registerCommand('workspaceExplorer.rename', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (!requireNode(node)) return;
             const oldBase = path.basename(node.uri.fsPath);
             const input = await vscode.window.showInputBox({
@@ -1100,6 +2247,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.refresh();
         }),
         vscode.commands.registerCommand('workspaceExplorer.move', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (!requireNode(node)) return;
             const root = vscode.workspace.workspaceFolders?.[0];
             if (!root) return;
@@ -1144,6 +2292,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.refresh();
         }),
         vscode.commands.registerCommand('workspaceExplorer.delete', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (!requireNode(node)) return;
             const name = path.basename(node.uri.fsPath);
             const choice = await vscode.window.showWarningMessage(
@@ -1159,6 +2308,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.refresh();
         }),
         vscode.commands.registerCommand('workspaceExplorer.duplicate', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             if (!requireNode(node)) return;
             try {
                 const dest = await findFreeDuplicateName(node.uri);
@@ -1169,6 +2319,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.refresh();
         }),
         vscode.commands.registerCommand('workspaceExplorer.newFile', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             const parent = folderTarget(node);
             if (!parent) return;
             const name = await vscode.window.showInputBox({ prompt: 'New file name' });
@@ -1189,6 +2340,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.refresh();
         }),
         vscode.commands.registerCommand('workspaceExplorer.newFolder', async (node?: FileNode) => {
+            node = coerceToFileNode(node) ?? node;
             const parent = folderTarget(node);
             if (!parent) return;
             const name = await vscode.window.showInputBox({ prompt: 'New folder name' });
@@ -1207,10 +2359,24 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
+    // Content changes only need a tree refresh (mtime-based sort) — never a decoration refresh.
+    const debouncedTreeRefresh = debounce(() => provider.refreshTree(), 400);
+    // Create/delete can change structure; still debounced.
+    const debouncedStructureRefresh = debounce(() => provider.refreshTree(), 250);
+
+    // Keep the collection-preview board in sync with the filesystem. A
+    // rename/delete/move/duplicate/new — from the card context menu, the tree
+    // menu, drag-drop, or an external tool — surfaces here as create/delete
+    // events, so re-render the board (no-op when it's closed).
+    const debouncedPreviewRefresh = debounce(() => { void CollectionPreviewPanel.refresh(); }, 250);
+
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
-    watcher.onDidCreate(() => provider.refresh());
-    watcher.onDidDelete(() => provider.refresh());
-    watcher.onDidChange(() => provider.refresh());
+    watcher.onDidCreate(() => { debouncedStructureRefresh(); debouncedPreviewRefresh(); });
+    watcher.onDidDelete(() => { debouncedStructureRefresh(); debouncedPreviewRefresh(); });
+    // Content edits only affect ordering when an mtime-based sort is active. Skipping
+    // the refresh otherwise avoids invalidating tree rows on every keystroke, which
+    // made colored labels/icons flash to their default (white) color mid-repaint.
+    watcher.onDidChange(() => { if (provider.hasEditedSort()) debouncedTreeRefresh(); });
     context.subscriptions.push(watcher);
 }
 
